@@ -31,10 +31,12 @@ from gnuradio import digital
 from receive_path import receive_path
 from uhd_interface import uhd_receiver
 
-import struct, sys
+import struct, sys, os
+print os.getpid()
+#raw_input("Press enter to continue")
 
 class my_top_block(gr.top_block):
-    def __init__(self, callback, options):
+    def __init__(self, callback, fwd_callback, options):
         gr.top_block.__init__(self)
 
         if(options.rx_freq is not None):
@@ -51,7 +53,7 @@ class my_top_block(gr.top_block):
         # Set up receive path
         # do this after for any adjustments to the options that may
         # occur in the sinks (specifically the UHD sink)
-        self.rxpath = receive_path(callback, options)
+        self.rxpath = receive_path(callback, fwd_callback, options)
 
         self.connect(self.source, self.rxpath)
         
@@ -107,7 +109,7 @@ def main():
             sys.exit(1)
 
     # build the graph
-    tb = my_top_block(rx_callback, options)
+    tb = my_top_block(rx_callback, fwd_callback, options)
 
     r = gr.enable_realtime_scheduling()
     if r != gr.RT_OK:

@@ -25,7 +25,7 @@ from gnuradio import eng_notation
 from gnuradio.eng_option import eng_option
 from optparse import OptionParser
 
-import sys
+import sys, time
 
 def add_freq_option(parser):
     """
@@ -47,6 +47,14 @@ class uhd_interface:
         
         if(istx):
             self.u = uhd.usrp_sink(device_addr=args, stream_args=uhd.stream_args('fc32'))
+            #self.u = uhd.usrp_sink(device_addr=args,
+            #                       io_type=uhd.io_type.COMPLEX_FLOAT32,
+            #                       num_channels=1)
+
+	    # to monitor the events raised in case there was an underflow (U) or late-msg (L) problem #
+            self._out_pktq = gr.msg_queue()
+            self.u_amsg_source = uhd.amsg_source(args, self._out_pktq)
+
         else:
             self.u = uhd.usrp_source(device_addr=args, stream_args=uhd.stream_args('fc32'))
 
@@ -64,8 +72,10 @@ class uhd_interface:
 
         # Set the antenna
         if(antenna):
-            self.u.set_antenna(antenna, 0)
-        
+           self.u.set_antenna(antenna, 0)
+
+	time.sleep(1)
+
     def set_sample_rate(self, bandwidth):
         self.u.set_samp_rate(bandwidth)
         actual_bw = self.u.get_samp_rate()

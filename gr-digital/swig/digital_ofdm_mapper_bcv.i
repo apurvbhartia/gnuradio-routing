@@ -1,6 +1,6 @@
 /* -*- c++ -*- */
 /*
- * Copyright 2006,2007,2011 Free Software Foundation, Inc.
+ * Copyright 2006,2007 Free Software Foundation, Inc.
  * 
  * This file is part of GNU Radio
  * 
@@ -19,28 +19,42 @@
  * the Free Software Foundation, Inc., 51 Franklin Street,
  * Boston, MA 02110-1301, USA.
  */
-
 GR_SWIG_BLOCK_MAGIC(digital,ofdm_mapper_bcv);
 
-digital_ofdm_mapper_bcv_sptr 
-digital_make_ofdm_mapper_bcv (const std::vector<gr_complex> &constellation,
-			      unsigned int msgq_limit,
-			      unsigned int bits_per_symbol, 
-			      unsigned int fft_length) throw(std::exception);
+digital_ofdm_mapper_bcv_sptr
+digital_make_ofdm_mapper_bcv (const std::vector<gr_complex> &hdr_constellation,
+                         const std::vector<gr_complex> &data_constellation,
+                         const std::vector<std::vector<gr_complex> > &preamble,
+                         unsigned int msgq_limit,
+                         unsigned int bits_per_symbol,
+                         unsigned int fft_length,
+                         unsigned int id=1,
+                         unsigned int source_flag=0,
+                         unsigned int batch_size=1,
+                         unsigned int dst_id=2) throw(std::exception);
 
 
 class digital_ofdm_mapper_bcv : public gr_sync_block
 {
  protected:
-  digital_ofdm_mapper_bcv (const std::vector<gr_complex> &constellation,
-			   unsigned int msgq_limit,
-			   unsigned int bits_per_symbol,
-			   unsigned int fft_length);
-  
+  digital_ofdm_mapper_bcv (const std::vector<gr_complex> &hdr_constellation,
+                      const std::vector<gr_complex> &data_constellation,
+                      const std::vector<std::vector<gr_complex> > &preamble,
+                      unsigned int msgq_limit,
+                      unsigned int bits_per_symbol,
+                      unsigned int fft_length,
+                      unsigned int id,
+                      unsigned int source_flag,
+                      unsigned int batch_size,
+                      unsigned int dst_id);
+
  public:
   gr_msg_queue_sptr msgq();
-  
+  void set_batch_to_send(int batch_id);
+
   int work(int noutput_items,
-	   gr_vector_const_void_star &input_items,
-	   gr_vector_void_star &output_items);
+           gr_vector_const_void_star &input_items,
+           gr_vector_void_star &output_items);
+
+  int isACKSocketOpen();
 };

@@ -32,6 +32,10 @@ from gnuradio import digital
 from transmit_path import transmit_path
 from uhd_interface import uhd_transmitter
 
+import struct, sys, os
+print os.getpid()
+#raw_input("Press enter to continue")
+
 class my_top_block(gr.top_block):
     def __init__(self, options):
         gr.top_block.__init__(self)
@@ -60,7 +64,7 @@ class my_top_block(gr.top_block):
 def main():
 
     def send_pkt(payload='', eof=False):
-        return tb.txpath.send_pkt(payload, eof)
+        return tb.txpath.send_pkt(payload, 0, eof)
 
     parser = OptionParser(option_class=eng_option, conflict_handler="resolve")
     expert_grp = parser.add_option_group("Expert")
@@ -98,7 +102,12 @@ def main():
 
     while n < nbytes:
         if options.from_file is None:
-            data = (pkt_size - 2) * chr(pktno & 0xff) 
+            if(pktno % 2 == 0):
+                data = (pkt_size - 2) * chr(3 & 0xff)
+            else:
+                data = (pkt_size - 2) * chr(4 & 0xff)
+            #data = (pkt_size - 2) * chr(pktno & 0xff) 
+            #data = (pkt_size - 2) * chr(0x34)
         else:
             data = source_file.read(pkt_size - 2)
             if data == '':
@@ -108,10 +117,12 @@ def main():
         send_pkt(payload)
         n += len(payload)
         sys.stderr.write('.')
-        if options.discontinuous and pktno % 5 == 4:
-            time.sleep(1)
+        #if options.discontinuous and pktno % 5 == 4:
+        #    time.sleep(1)
         pktno += 1
-        
+	time.sleep(0.4)
+	#time.sleep(0.1)
+
     send_pkt(eof=True)
     tb.wait()                       # wait for it to finish
 
