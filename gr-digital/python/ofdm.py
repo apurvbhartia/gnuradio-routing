@@ -67,7 +67,6 @@ class ofdm_mod(gr.hier_block2):
         self._fec_n = options.fec_n
         self._fec_k = options.fec_k
 	self._batch_size = options.batch_size
-	self._encode_flag = options.encode_flag
 	self._ack = options.ack
 
         if(self._fec_n < self._fec_k):
@@ -225,14 +224,10 @@ class ofdm_mod(gr.hier_block2):
 			  help="refer ofdm.py (mod) param [default=%default]")
 	expert.add_option("", "--ack", type="intx", default=0,
 			  help="enables ACK on ethernet [default=%default]")
-	expert.add_option("", "--fwd", type="intx", default=0,
-                          help="forwarder ranking (1:lead forwarder, 2: 2nd slave, 3:3rd slave, etc [default=%default]")
 	expert.add_option("", "--dst-id", type="intx", default=2,
                           help="the destination id [default=%default]")
 	expert.add_option("", "--hop", type="intx", default=0,
                           help="hop number (for preamble) [default=%default]")
-        expert.add_option("","--mimo", type="intx", default=0,
-                         help="enable MIMO TX [default=%default]")
 	# apurv++ end #
 
     # Make a static method to call before instantiation
@@ -249,7 +244,6 @@ class ofdm_mod(gr.hier_block2):
         print "CP length:       %3d"   % (self._cp_length)
 
         print "Batch size:      %3d"   % (self._batch_size)
-        print "Encode symbols:  %3d"   % (self._encode_flag)
 	print "Node Id: 	%3d"   % (self._id)
 	print "FEC: (",self._fec_n,",",self._fec_k,")"
 
@@ -295,7 +289,6 @@ class ofdm_demod(gr.hier_block2):
         self._fec_n = options.fec_n
         self._fec_k = options.fec_k
         self._batch_size = options.batch_size
-        self._decode_flag = options.decode_flag
 	self._threshold = options.threshold
 	self._size = options.size
         if(self._fec_n < self._fec_k):
@@ -348,34 +341,8 @@ class ofdm_demod(gr.hier_block2):
             data_rotated_const = map(lambda pt: pt * data_rot, data_constel.points())
 	self._bits_per_symbol = int(math.log(mods[self._modulation], 2))		# just a useless parameter now #
 
-	"""
-        arity = mods[self._modulation]
-	self._bits_per_symbol = int(math.log(mods[self._modulation], 2))
-	#print "arity: ", arity
- 	#print "mod: ", self._modulation       
- 
-        # FIXME: pass the constellation objects instead of just the points
-        if(self._modulation.find("psk") >= 0):
-            constel = psk.psk_constellation(arity)
-            rotated_const = map(lambda pt: pt * rot, constel.points())
-        elif(self._modulation.find("qam") >= 0):
-            constel = qam.qam_constellation(arity)
-            rotated_const = map(lambda pt: pt * rot, constel.points())
-        #print rotated_const
-	"""
-
         phgain = 0.25
         frgain = phgain*phgain / 4.0
-	"""
-        self.ofdm_demod = digital_swig.ofdm_frame_sink(rotated_const, range(arity),
-                                             self._rcvd_pktq, self._out_pktq,
-                                             self._occupied_tones, self._fft_length,
-                                             phgain, frgain, self._id,
-					     self._batch_size, self._decode_flag, 
-					     options.fwd, 
-					     options.replay,
-					     self._size, self._fec_n, self._fec_k, options.degree)
-	"""
 
 	# preambles contains all the 'preambles' used in frame_acquisition + 1 (for snr calculation)
 	preambles = (ksfreq, ksfreq2, ksfreq2) #, ksfreq2, ksfreq2, ksfreq2)						# send the extra symbol for snr calculation
@@ -385,10 +352,8 @@ class ofdm_demod(gr.hier_block2):
                                              self._rcvd_pktq, self._out_pktq,
                                              self._occupied_tones, self._fft_length,
                                              phgain, frgain, self._id,
-                                             self._batch_size, self._decode_flag, 
-                                             options.fwd, 
-                                             options.replay,
-                                             self._size, self._fec_n, self._fec_k, options.degree, options.h_smart)
+                                             self._batch_size, 
+                                             self._size, self._fec_n, self._fec_k)
 
         self.connect(self, self.ofdm_recv)
 
@@ -397,8 +362,6 @@ class ofdm_demod(gr.hier_block2):
            	self.connect((self.ofdm_recv, 0), (self.ofdm_demod, 0))
            	self.connect((self.ofdm_recv, 1), (self.ofdm_demod, 1))
    	   	self.connect((self.ofdm_recv, 2), (self.ofdm_demod, 2))			# apurv++, hestimates #
-		#self.connect((self.ofdm_recv, 3), (self.ofdm_demod, 3))			# apurv++, for offline analysis (from sampler)
-		##self.connect((self.ofdm_recv, 3), gr.null_sink(gr.sizeof_gr_complex*self._fft_length))
 	elif manual==1: 
            	self.connect(gr.file_source(gr.sizeof_gr_complex*self._occupied_tones, "out-tx.dat"), (self.ofdm_demod, 0))
            	self.connect(gr.file_source(gr.sizeof_char, "out-timing.dat"), (self.ofdm_demod, 1))
@@ -412,8 +375,6 @@ class ofdm_demod(gr.hier_block2):
 	self.connect((self.ofdm_recv, 1), gr.null_sink(gr.sizeof_char))						# timing
 	self.connect((self.ofdm_recv, 2), gr.null_sink(gr.sizeof_gr_complex*self._occupied_tones))		# hestimates
 	'''
-        if options.log:
-            self.connect(self.ofdm_demod, gr.file_sink(gr.sizeof_gr_complex*self._occupied_tones, "ofdm_frame_sink_c.dat"))
 
         if options.verbose:
             self._print_verbage()
@@ -445,14 +406,10 @@ class ofdm_demod(gr.hier_block2):
                           help="expected size (in bytes) of the rx packet [default=400]")
         expert.add_option("", "--batch-size", type="intx", default=1,
                           help="sets the batch size [default=%default]")
-        expert.add_option("", "--decode-flag", type="intx", default=1,
-                          help="decodes the symbols (if true) [default=%default]")
 	expert.add_option("", "--id", type="intx", default=1,
                           help="sets the node id [default=%default]")
         expert.add_option("", "--threshold", type="float", default=1.0,
                           help="cross correlation threshold [default=%default]")
-        expert.add_option("", "--replay", type="intx", default=-1,
-                          help="replays the f-domain trace collected as dst (replayed trace need NOT be corrected/derotated then) [default=%default]")
         expert.add_option("", "--rx-manual", type="intx", default=0,
                           help="refer ofdm.py (demod) param [default=%default]")
 
@@ -463,9 +420,6 @@ class ofdm_demod(gr.hier_block2):
                           help="refer ofdm_receiver.py param [default=%default]")
         expert.add_option("", "--use-chan-filt", type="intx", default=1,
                           help="refer ofdm_receiver.py param [default=%default]")
-
-	expert.add_option("", "--fwd", type="intx", default=0,
-                          help="forwarder ranking (1:lead forwarder, 2: 2nd slave, 3:3rd slave, etc [default=%default]")
         expert.add_option("", "--hop", type="intx", default=0,
                           help="hop number (for preamble) [default=%default]")
         # apurv++ end #
@@ -480,7 +434,7 @@ class ofdm_demod(gr.hier_block2):
 
     def send_ack(self, flow, batch):
 	print "ofdm.py -->> send_ack called"
-	self.ofdm_demod.send_ack(flow, batch)
+	#self.ofdm_demod.send_ack(flow, batch)
 
     def _print_verbage(self):
         """
@@ -494,7 +448,6 @@ class ofdm_demod(gr.hier_block2):
 	
 	print "Node Id:         %3d"   % (self._id)
 	print "Batch size:      %3d"   % (self._batch_size)
-	print "Decode symbols:  %3d"   % (self._decode_flag)
 	print "Correlation threshold: %f" % (self._threshold)
 	print "FEC: (",self._fec_n,",",self._fec_k,")"	
 	

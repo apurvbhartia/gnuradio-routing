@@ -359,16 +359,7 @@ digital_ofdm_mapper_bcv::work(int noutput_items,
   }
 #endif	// ACK_ON_ETHERNET
 
-  //int packetlen = 0;		//only used for make_header//
-
-#ifndef ACK_ON_ETHERNET
-  if(d_packets_sent_for_batch == (d_batch_size+1))
-  {
-	d_packets_sent_for_batch = 0;
-	d_batch_to_send += 1;
-  }
-#endif
-
+  d_batch_to_send += 1;
 
   /* if trigged batch_to_send is different from current batch_q_num, 
      then new batch needs to be sent out. 
@@ -379,7 +370,6 @@ digital_ofdm_mapper_bcv::work(int noutput_items,
   if(d_batch_q_num != d_batch_to_send)
   {
 	printf("start batch: %d, d_batch_q_num: %d\n", d_batch_to_send, d_batch_q_num); fflush(stdout);
-	flushBatchQ();
 	for(unsigned int b = 0; b < d_batch_size; b++)
 	{
 	    d_msg.reset();
@@ -574,13 +564,6 @@ digital_ofdm_mapper_bcv::initializeBatchParams()
 {
   d_msg_offset = d_bit_offset = d_nresid = d_resid = 0;
 }
-
-void
-digital_ofdm_mapper_bcv::flushBatchQ()
-{
-
-}
-
 
 // generate an OFDM symbol *each* for the packets involved //
 void

@@ -1,6 +1,6 @@
 /* -*- c++ -*- */
 /*
- * Copyright 2007,2011 Free Software Foundation, Inc.
+ * Copyright 2007 Free Software Foundation, Inc.
  * 
  * This file is part of GNU Radio
  * 
@@ -26,12 +26,15 @@
 #include <digital_api.h>
 #include <gr_sync_block.h>
 
+#include <uhd/usrp/multi_usrp.hpp>
+
 class digital_ofdm_sampler;
 typedef boost::shared_ptr<digital_ofdm_sampler> digital_ofdm_sampler_sptr;
 
 DIGITAL_API digital_ofdm_sampler_sptr digital_make_ofdm_sampler (unsigned int fft_length, 
-						     unsigned int symbol_length,
-						     unsigned int timeout=1000);
+					   unsigned int symbol_length,
+					   unsigned int num_preambles,
+					   unsigned int timeout=100);
 
 /*!
  * \brief does the rest of the OFDM stuff
@@ -40,12 +43,14 @@ DIGITAL_API digital_ofdm_sampler_sptr digital_make_ofdm_sampler (unsigned int ff
 class DIGITAL_API digital_ofdm_sampler : public gr_block
 {
   friend DIGITAL_API digital_ofdm_sampler_sptr digital_make_ofdm_sampler (unsigned int fft_length, 
-							      unsigned int symbol_length,
-							      unsigned int timeout);
+						    unsigned int symbol_length,
+						    unsigned int num_preambles,
+						    unsigned int timeout);
 
   digital_ofdm_sampler (unsigned int fft_length, 
-			unsigned int symbol_length,
-			unsigned int timeout);
+		   unsigned int symbol_length,
+		   unsigned int num_preambles,
+		   unsigned int timeout);
 
  private:
   enum state_t {STATE_NO_SIG, STATE_PREAMBLE, STATE_FRAME};
@@ -63,6 +68,25 @@ class DIGITAL_API digital_ofdm_sampler : public gr_block
 		    gr_vector_int &ninput_items,
 		    gr_vector_const_void_star &input_items,
 		    gr_vector_void_star &output_items);
+
+  // apurv++ for logging the preamble // 
+  FILE *d_fp; 
+  int d_fd;
+  bool d_file_opened;  
+
+  void log_preamble(gr_complex *, long);
+  bool open_log();
+  // apurv++ ends //
+
+  uint64_t d_prev_index;
+  uhd::usrp::multi_usrp::sptr d_usrp;
+  bool d_joint_rx_on; 
+
+  // fine offset correction //
+  void correct_freq_offset(gr_complex *out, int noutput_items, float phase);
+  float d_phase;
+
+  unsigned int d_num_preambles;
 };
 
 #endif

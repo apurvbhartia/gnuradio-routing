@@ -25,7 +25,7 @@ from numpy import fft
 from gnuradio import gr
 
 class ofdm_sync_pn(gr.hier_block2):
-    def __init__(self, fft_length, cp_length, logging=False):
+    def __init__(self, fft_length, cp_length, kstime, threshold, logging=False):
         """
         OFDM synchronization using PN Correlation:
         T. M. Schmidl and D. C. Cox, "Robust Frequency and Timing
@@ -59,6 +59,7 @@ class ofdm_sync_pn(gr.hier_block2):
         # Create a moving sum filter for the input
         self.inputmag2 = gr.complex_to_mag_squared()
         movingsum2_taps = [1.0 for i in range(fft_length//2)]
+	#movingsum2_taps = [0.5 for i in range(fft_length*4)]		#apurv - implementing Veljo's suggestion, when pause b/w packets
 
         if 1:
             self.inputmovingsum = gr.fir_filter_fff(1,movingsum2_taps)
@@ -76,8 +77,7 @@ class ofdm_sync_pn(gr.hier_block2):
 
         #ML measurements input to sampler block and detect
         self.sub1 = gr.add_const_ff(-1)
-        self.pk_detect = gr.peak_detector_fb(0.20, 0.20, 30, 0.001)
-        #self.pk_detect = gr.peak_detector2_fb(9)
+        self.pk_detect = gr.peak_detector_fb(0.20, 0.20, 30, 0.001)	#apurv - implementing Veljo's suggestion, when pause b/w packets
 
         self.connect(self, self.input)
         
@@ -86,32 +86,44 @@ class ofdm_sync_pn(gr.hier_block2):
         self.connect(self.input, (self.corr,0))
         self.connect(self.delay, self.conjg)
         self.connect(self.conjg, (self.corr,1))
+
+
         self.connect(self.corr, self.moving_sum_filter)
-        self.connect(self.moving_sum_filter, self.c2mag)
+        #self.connect(self.moving_sum_filter, self.c2mag)
         self.connect(self.moving_sum_filter, self.angle)
-        self.connect(self.angle, (self.sample_and_hold,0))
+        self.connect(self.angle, (self.sample_and_hold,0))		# apurv--
+	#self.connect(self.angle, gr.delay(gr.sizeof_float, offset), (self.sample_and_hold, 0))	#apurv++
 
-        # Get the power of the input signal to normalize the output of the correlation
-        self.connect(self.input, self.inputmag2, self.inputmovingsum)
-        self.connect(self.inputmovingsum, (self.square,0))
-        self.connect(self.inputmovingsum, (self.square,1))
-        self.connect(self.square, (self.normalize,1))
-        self.connect(self.c2mag, (self.normalize,0))
+	cross_correlate = 1
+	if cross_correlate==1:
+	   # cross-correlate with the known symbol
+	   kstime = [k.conjugate() for k in kstime]
+           kstime.reverse()
+           self.crosscorr_filter = gr.fir_filter_ccc(1, kstime)
 
-        # Create a moving sum filter for the corr output
-        matched_filter_taps = [1.0/cp_length for i in range(cp_length)]
-        self.matched_filter = gr.fir_filter_fff(1,matched_filter_taps)
-        self.connect(self.normalize, self.matched_filter)
-        
-        self.connect(self.matched_filter, self.sub1, self.pk_detect)
-        #self.connect(self.matched_filter, self.pk_detect)
-        self.connect(self.pk_detect, (self.sample_and_hold,1))
+	   # get the magnitude #
+	   self.corrmag = gr.complex_to_mag_squared()
 
+	   self.f2b = gr.float_to_char()
+	   self.threshold_factor = threshold #0.0012 #0.012   #0.0015
+	   self.slice = gr.threshold_ff(self.threshold_factor, self.threshold_factor, 0, fft_length)
+
+	   self.connect(self.input, self.crosscorr_filter, self.corrmag, self.slice, self.f2b)
+
+	   # some debug dump #
+	   self.connect(self.corrmag, gr.file_sink(gr.sizeof_float, "ofdm_corrmag.dat"))
+	   self.connect(self.f2b, gr.file_sink(gr.sizeof_char, "ofdm_f2b.dat"))
+	   
+
+	self.connect(self.f2b, (self.sample_and_hold,1))
+	
         # Set output signals
         #    Output 0: fine frequency correction value
         #    Output 1: timing signal
         self.connect(self.sample_and_hold, (self,0))
-        self.connect(self.pk_detect, (self,1))
+	#self.connect(self.pk_detect, (self,1))									#removed
+	#self.connect(self.f2b, gr.delay(gr.sizeof_char, 1), (self, 1))
+	self.connect(self.f2b, (self, 1))
 
         if logging:
             self.connect(self.matched_filter, gr.file_sink(gr.sizeof_float, "ofdm_sync_pn-mf_f.dat"))

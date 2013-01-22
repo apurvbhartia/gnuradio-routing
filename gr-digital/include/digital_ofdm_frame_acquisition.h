@@ -1,6 +1,6 @@
 /* -*- c++ -*- */
 /*
- * Copyright 2006,2007,2011 Free Software Foundation, Inc.
+ * Copyright 2006, 2007 Free Software Foundation, Inc.
  * 
  * This file is part of GNU Radio
  * 
@@ -30,10 +30,11 @@
 class digital_ofdm_frame_acquisition;
 typedef boost::shared_ptr<digital_ofdm_frame_acquisition> digital_ofdm_frame_acquisition_sptr;
 
-digital_ofdm_frame_acquisition_sptr 
-DIGITAL_API digital_make_ofdm_frame_acquisition (unsigned int occupied_carriers, unsigned int fft_length,
+DIGITAL_API digital_ofdm_frame_acquisition_sptr 
+digital_make_ofdm_frame_acquisition (unsigned int occupied_carriers, unsigned int fft_length,
 				unsigned int cplen,
-				const std::vector<gr_complex> &known_symbol, 
+				//const std::vector<gr_complex> &known_symbol, 
+				const std::vector<std::vector<gr_complex> >  &known_symbol,
 				unsigned int max_fft_shift_len=10);
 
 /*!
@@ -68,29 +69,33 @@ class DIGITAL_API digital_ofdm_frame_acquisition : public gr_block
   friend DIGITAL_API digital_ofdm_frame_acquisition_sptr
   digital_make_ofdm_frame_acquisition (unsigned int occupied_carriers, unsigned int fft_length,
 				  unsigned int cplen,
-				  const std::vector<gr_complex> &known_symbol, 
+				  //const std::vector<gr_complex> &known_symbol, 
+				  const std::vector<std::vector<gr_complex> >  &known_symbol,
 				  unsigned int max_fft_shift_len);
   
 protected:
   digital_ofdm_frame_acquisition (unsigned int occupied_carriers, unsigned int fft_length,
 			     unsigned int cplen,
-			     const std::vector<gr_complex> &known_symbol, 
+			     //const std::vector<gr_complex> &known_symbol, 
+			     const std::vector<std::vector<gr_complex> >  &known_symbol,
 			     unsigned int max_fft_shift_len);
   
  private:
   unsigned char slicer(gr_complex x);
   void correlate(const gr_complex *symbol, int zeros_on_left);
   void calculate_equalizer(const gr_complex *symbol, int zeros_on_left);
-  gr_complex coarse_freq_comp(int freq_delta, int count);
+  gr_complex coarse_freq_comp(float freq_delta, int count);
   
   unsigned int d_occupied_carriers;  // !< \brief number of subcarriers with data
   unsigned int d_fft_length;         // !< \brief length of FFT vector
   unsigned int d_cplen;              // !< \brief length of cyclic prefix in samples
   unsigned int d_freq_shift_len;     // !< \brief number of surrounding bins to look at for correlation
-  std::vector<gr_complex> d_known_symbol; // !< \brief known symbols at start of frame
+  //std::vector<gr_complex> d_known_symbol; // !< \brief known symbols at start of frame
+  const std::vector<std::vector<gr_complex> >  d_known_symbol;
   std::vector<float> d_known_phase_diff; // !< \brief factor used in correlation from known symbol
   std::vector<float> d_symbol_phase_diff; // !< \brief factor used in correlation from received symbol
-  std::vector<gr_complex> d_hestimate;  // !< channel estimate
+  //std::vector<gr_complex> d_hestimate;  // !< channel estimate
+  gr_complex *d_hestimate;
   int d_coarse_freq;             // !< \brief search distance in number of bins
   unsigned int d_phase_count;           // !< \brief accumulator for coarse freq correction
   float d_snr_est;                      // !< an estimation of the signal to noise ratio
@@ -98,6 +103,7 @@ protected:
   gr_complex *d_phase_lut;  // !< look-up table for coarse frequency compensation
 
   void forecast(int noutput_items, gr_vector_int &ninput_items_required);
+  unsigned int d_cur_symbol;
 
  public:
   /*!
@@ -110,6 +116,9 @@ protected:
 		   gr_vector_int &ninput_items,
 		   gr_vector_const_void_star &input_items,
 		   gr_vector_void_star &output_items);
+  
+  
+  void test_timestamp(int); 
 };
 
 

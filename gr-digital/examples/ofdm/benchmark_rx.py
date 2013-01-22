@@ -89,6 +89,9 @@ def main():
             print printable
             print "\n"
 
+    def fwd_callback():
+            print "fwd_callback (wrapper) invoked!"
+
     parser = OptionParser(option_class=eng_option, conflict_handler="resolve")
     expert_grp = parser.add_option_group("Expert")
     parser.add_option("","--discontinuous", action="store_true", default=False,

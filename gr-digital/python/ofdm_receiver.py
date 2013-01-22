@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+
 #
 # Copyright 2006, 2007, 2008 Free Software Foundation, Inc.
 # 
@@ -26,9 +27,6 @@ from gnuradio import gr
 
 import digital_swig
 from ofdm_sync_pn import ofdm_sync_pn
-from ofdm_sync_fixed import ofdm_sync_fixed
-from ofdm_sync_pnac import ofdm_sync_pnac
-from ofdm_sync_ml import ofdm_sync_ml
 
 class ofdm_receiver(gr.hier_block2):
     """
@@ -40,7 +38,7 @@ class ofdm_receiver(gr.hier_block2):
     (Van de Beeks).
     """
 
-    def __init__(self, fft_length, cp_length, occupied_tones, snr, ks, logging=False):
+    def __init__(self, fft_length, cp_length, occupied_tones, snr, ks, threshold, options, logging=False):
         """
 	Hierarchical block for receiving OFDM symbols.
 
@@ -63,8 +61,8 @@ class ofdm_receiver(gr.hier_block2):
 
 	gr.hier_block2.__init__(self, "ofdm_receiver",
 				gr.io_signature(1, 1, gr.sizeof_gr_complex), # Input signature
-                                gr.io_signature2(2, 2, gr.sizeof_gr_complex*occupied_tones, gr.sizeof_char)) # Output signature
-        
+				gr.io_signature3(3, 3, gr.sizeof_gr_complex*occupied_tones, gr.sizeof_char, gr.sizeof_gr_complex*occupied_tones))	# apurv++, goes into frame sink for hestimates
+
         bw = (float(occupied_tones) / float(fft_length)) / 2.0
         tb = bw*0.08
         chan_coeffs = gr.firdes.low_pass (1.0,                     # gain
@@ -75,77 +73,108 @@ class ofdm_receiver(gr.hier_block2):
         self.chan_filt = gr.fft_filter_ccc(1, chan_coeffs)
         
         win = [1 for i in range(fft_length)]
-
         zeros_on_left = int(math.ceil((fft_length - occupied_tones)/2.0))
         ks0 = fft_length*[0,]
         ks0[zeros_on_left : zeros_on_left + occupied_tones] = ks[0]
-        
+
+
+
         ks0 = fft.ifftshift(ks0)
         ks0time = fft.ifft(ks0)
         # ADD SCALING FACTOR
         ks0time = ks0time.tolist()
-
-        SYNC = "pn"
-        if SYNC == "ml":
-            nco_sensitivity = -1.0/fft_length   # correct for fine frequency
-            self.ofdm_sync = ofdm_sync_ml(fft_length,
-                                          cp_length,
-                                          snr,
-                                          ks0time,
-                                          logging)
-        elif SYNC == "pn":
-            nco_sensitivity = -2.0/fft_length   # correct for fine frequency
-            self.ofdm_sync = ofdm_sync_pn(fft_length,
-                                          cp_length,
-                                          logging)
-        elif SYNC == "pnac":
-            nco_sensitivity = -2.0/fft_length   # correct for fine frequency
-            self.ofdm_sync = ofdm_sync_pnac(fft_length,
-                                            cp_length,
-                                            ks0time,
-                                            logging)
-        # for testing only; do not user over the air
-        # remove filter and filter delay for this
-        elif SYNC == "fixed":
-            self.chan_filt = gr.multiply_const_cc(1.0) 
-            nsymbols = 18      # enter the number of symbols per packet
-            freq_offset = 0.0  # if you use a frequency offset, enter it here
-            nco_sensitivity = -2.0/fft_length   # correct for fine frequency
-            self.ofdm_sync = ofdm_sync_fixed(fft_length,
-                                             cp_length,
-                                             nsymbols,
-                                             freq_offset,
-                                             logging)
+	nco_sensitivity = -2.0/fft_length
+	ofdm_sync = ofdm_sync_pn(fft_length, cp_length, ks0time, threshold, logging)
 
         # Set up blocks
 
-        self.nco = gr.frequency_modulator_fc(nco_sensitivity)         # generate a signal proportional to frequency error of sync block
-        self.sigmix = gr.multiply_cc()
-        self.sampler = digital_swig.ofdm_sampler(fft_length, fft_length+cp_length)
-        self.fft_demod = gr.fft_vcc(fft_length, True, win, True)
-        self.ofdm_frame_acq = digital_swig.ofdm_frame_acquisition(occupied_tones,
-                                                                  fft_length,
-                                                                  cp_length, ks[0])
+        nco = gr.frequency_modulator_fc(nco_sensitivity)         # generate a signal proportional to frequency error of sync block
+        sigmix = gr.multiply_cc()				     
+        sampler = digital_swig.ofdm_sampler(fft_length, fft_length+cp_length, len(ks)+1, 100)	# 1 for the extra preamble which ofdm_rx doesn't know about (check frame_sink)
+        fft_demod = gr.fft_vcc(fft_length, True, win, True)
+        ofdm_frame_acq = digital_swig.ofdm_frame_acquisition(occupied_tones, fft_length,
+                                                        cp_length, ks)
 
-        self.connect(self, self.chan_filt)                            # filter the input channel
-        self.connect(self.chan_filt, self.ofdm_sync)                  # into the synchronization alg.
-        self.connect((self.ofdm_sync,0), self.nco, (self.sigmix,1))   # use sync freq. offset output to derotate input signal
-        self.connect(self.chan_filt, (self.sigmix,0))                 # signal to be derotated
-        self.connect(self.sigmix, (self.sampler,0))                   # sample off timing signal detected in sync alg
-        self.connect((self.ofdm_sync,1), (self.sampler,1))            # timing signal to sample at
+        if options.verbose:
+            self._print_verbage(options)
 
-        self.connect((self.sampler,0), self.fft_demod)                # send derotated sampled signal to FFT
-        self.connect(self.fft_demod, (self.ofdm_frame_acq,0))         # find frame start and equalize signal
-        self.connect((self.sampler,1), (self.ofdm_frame_acq,1))       # send timing signal to signal frame start
-        self.connect((self.ofdm_frame_acq,0), (self,0))               # finished with fine/coarse freq correction,
-        self.connect((self.ofdm_frame_acq,1), (self,1))               # frame and symbol timing, and equalization
+	############# input -> chan_filt ##############
+	self.connect(self, self.chan_filt)
+	use_chan_filt = options.use_chan_filt
+
+	if use_chan_filt == 1:
+ 	    ##### chan_filt -> SYNC, chan_filt -> SIGMIX ####
+	    self.connect(self.chan_filt, ofdm_sync)
+	    self.connect(self.chan_filt, gr.delay(gr.sizeof_gr_complex, (fft_length)), (sigmix, 0))        # apurv++ follow freq offset
+	    #self.connect((ofdm_sync, 0), (sigmix, 0))
+	    self.connect(self.chan_filt, gr.file_sink(gr.sizeof_gr_complex, "ofdm_receiver-chan_filt_c.dat"))
+
+	elif use_chan_filt == 2: 
+	    #### alternative: chan_filt-> NULL, file_source -> SYNC, file_source -> SIGMIX ####
+	    self.connect(self.chan_filt, gr.null_sink(gr.sizeof_gr_complex))
+	    self.connect(gr.file_source(gr.sizeof_gr_complex, "chan_filt.dat"), ofdm_sync)
+	    self.connect((ofdm_sync, 0), (sigmix, 0))
+	else:
+	    # chan_filt->NULL #
+	    self.connect(self.chan_filt, gr.null_sink(gr.sizeof_gr_complex))
+	
+	method = options.method
+	if method == -1:
+            self.connect((ofdm_sync,0), nco, (sigmix,1))
+	    self.connect(sigmix, (sampler,0))                   				# corrected output (0'ed FF)
+	    self.connect((ofdm_sync,1), gr.delay(gr.sizeof_char, fft_length), (sampler, 1))           				# timing signal
+
+	    # route received time domain to sink (all-the-way) for offline analysis #
+	    self.connect((sampler, 1), gr.file_sink(gr.sizeof_char*fft_length, "sampler_timing.dat"))
+
+	elif method == 0:
+            # NORMAL functioning #
+	    self.connect((ofdm_sync,1), nco, (sigmix,1))   # use sync freq. offset output to derotate input signal
+	    self.connect(sigmix, (sampler,0))                   # sample off timing signal detected in sync alg
+	    self.connect((ofdm_sync,2), (sampler, 1))	
+	#######################################################################
+
+	use_default = options.use_default
+        if use_default == 0:		#(set method == 0)
+            self.connect(gr.file_source(gr.sizeof_gr_complex*fft_length, "symbols_src.dat"), fft_demod)
+            self.connect(gr.file_source(gr.sizeof_char*fft_length, "timing_src.dat"), (ofdm_frame_acq,1))
+	    self.connect(fft_demod, (ofdm_frame_acq,0))
+	elif use_default == 1:		#(set method == -1)
+		# normal functioning #
+            self.connect((sampler,0), fft_demod)                # send derotated sampled signal to FFT
+            self.connect((sampler,1), (ofdm_frame_acq,1))       # send timing signal to signal frame start
+	    self.connect(fft_demod, (ofdm_frame_acq,0))
+        elif use_default == 2:
+	       # replay directly to ofdm_frame_acq (frequency domain) #
+            self.connect(gr.file_source(gr.sizeof_gr_complex*fft_length, "symbols_src.dat"), (ofdm_frame_acq,0))
+            self.connect(gr.file_source(gr.sizeof_char*fft_length, "timing_src.dat"), (ofdm_frame_acq,1))
+	
+        self.connect((ofdm_frame_acq,0), (self,0))               # finished with fine/coarse freq correction,
+        self.connect((ofdm_frame_acq,1), (self,1))               # frame and symbol timing, and equalization
+        self.connect((ofdm_frame_acq,2), (self,2))               # equalizer: hestimates 
+
+	#self.connect(self.ofdm_frame_acq, gr.file_sink(gr.sizeof_gr_complex*occupied_tones, "ofdm_receiver-frame_acq_c.dat"))
+	self.connect((ofdm_frame_acq,1), gr.file_sink(1, "ofdm_receiver-found_corr_b.dat"))
 
         if logging:
             self.connect(self.chan_filt, gr.file_sink(gr.sizeof_gr_complex, "ofdm_receiver-chan_filt_c.dat"))
-            self.connect(self.fft_demod, gr.file_sink(gr.sizeof_gr_complex*fft_length, "ofdm_receiver-fft_out_c.dat"))
-            self.connect(self.ofdm_frame_acq,
+            self.connect(fft_demod, gr.file_sink(gr.sizeof_gr_complex*fft_length, "ofdm_receiver-fft_out_c.dat"))
+            self.connect(ofdm_frame_acq,
                          gr.file_sink(gr.sizeof_gr_complex*occupied_tones, "ofdm_receiver-frame_acq_c.dat"))
-            self.connect((self.ofdm_frame_acq,1), gr.file_sink(1, "ofdm_receiver-found_corr_b.dat"))
-            self.connect(self.sampler, gr.file_sink(gr.sizeof_gr_complex*fft_length, "ofdm_receiver-sampler_c.dat"))
-            self.connect(self.sigmix, gr.file_sink(gr.sizeof_gr_complex, "ofdm_receiver-sigmix_c.dat"))
-            self.connect(self.nco, gr.file_sink(gr.sizeof_gr_complex, "ofdm_receiver-nco_c.dat"))
+            self.connect((ofdm_frame_acq,1), gr.file_sink(1, "ofdm_receiver-found_corr_b.dat"))
+            self.connect(sampler, gr.file_sink(gr.sizeof_gr_complex*fft_length, "ofdm_receiver-sampler_c.dat"))
+            #self.connect(sigmix, gr.file_sink(gr.sizeof_gr_complex, "ofdm_receiver-sigmix_c.dat"))
+            self.connect(nco, gr.file_sink(gr.sizeof_gr_complex, "ofdm_receiver-nco_c.dat"))
+
+    def _print_verbage(self, options):
+        """
+        Prints information about the OFDM receiver specific options
+        """
+	print "\n--------------------------------------------------"
+        print "OFDM Receiver flags:"
+        print "use_chan_filt: %3d"    % (options.use_chan_filt)
+        print "method:      %3d"   % (options.method)
+        print "use_default:  %3d"   % (options.use_default)
+	print "rx_manual:       %3d"   % (options.rx_manual)
+	print "----------------------------------------------------\n"
+
