@@ -81,23 +81,6 @@ digital_make_ofdm_frame_sink (const std::vector<gr_complex> &hdr_sym_position,
 			 unsigned int batch_size=1,  
 			 int exp_size=400, int fec_n=0, int fec_k=0);
 
-/* encapsulates the sender details into it */
-typedef struct pkt_str {
-  unsigned int n_senders;
-  gr_complex* symbols;
-} PktInfo;
-
-typedef struct flow_info_str {
-  NodeId src;
-  NodeId dst;
-  unsigned char flowId;
-  unsigned int active_batch;
-  unsigned int last_batch_acked;
-  unsigned int pkts_fwded; 
-} FlowInfo;
-
-typedef vector<FlowInfo*> FlowInfoVector;
-
 /* credits */
 typedef struct credit_str {
   unsigned char flowId;
@@ -477,7 +460,7 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
 
   /* ack */
   static const int ACK_HEADERBYTELEN = sizeof(MULTIHOP_ACK_HDR_TYPE);
-  static const int ACK_HEADERDATALEN = ACK_HEADERBYTELEN - ACK_PADDING_SIZE-4;
+  static const int ACK_HEADERDATALEN = ACK_HEADERBYTELEN - ACK_PADDING_SIZE;
 
  public:
   /* apurv start */
@@ -518,7 +501,10 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
   FlowInfoVector d_flowInfoVector;
   PktInfo *d_pktInfo;			     // current pkt being serviced 
   gr_msg_queue_sptr  d_out_queue;            // contains modulated packets to be forwarded/ACKs
+
   FlowInfo* getFlowInfo(bool create, unsigned char flowId);
+  void populateFlowInfo();
+  void populateRouteInfo();
   void resetPktInfo(PktInfo *pktInfo);
   PktInfo* createPktInfo();
 
@@ -526,7 +512,7 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
   void makeHeader(MULTIHOP_HDR_TYPE &header, unsigned char *header_bytes, FlowInfo *flowInfo, unsigned int nextLinkId);
 
   /* decoding/demodulating */
-  void demodulate_packet();
+  bool demodulate_packet();
 
   /* etc */
   void equalizeSymbols(gr_complex *in, gr_complex *in_estimates);
@@ -571,8 +557,9 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
   void equalize_interpolate_dfe(const gr_complex *in, gr_complex *out);
 
   /* to send the ACK on the backend ethernet */
-  //void send_ack(unsigned char flow_id, unsigned char batch_id);
-  int d_ack_sock;
+  void send_ack(unsigned char flow_id, unsigned char batch_id, bool ack);
+  void create_ack_socks();
+  vector<unsigned int> d_ack_rx_socks, d_ack_tx_socks;
   bool crc_check(std::string msg, std::string&);
 
   int d_hdr_ofdm_index;
@@ -602,8 +589,10 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
 
  EthInfoMap d_ethInfoMap;
 
- // sockets used //
- int d_coeff_tx_sock, d_coeff_rx_sock;				// for tx coefficients between the co-ordinating transmitters //
+ /* maps are maintained for helping in socket creation. This will allow to maintain a map
+ of unique prevNodes and nextNodes for each node */ 
+ map<unsigned char, bool> d_prevNodeIds;				
+ map<unsigned char, bool> d_nextNodeIds;
  
 // to record the pkt timestamps 
  uhd::time_spec_t d_last_pkt_time, d_out_pkt_time;

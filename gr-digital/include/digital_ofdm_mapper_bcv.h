@@ -477,6 +477,9 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
 
   int openACKSocket();
   int isACKSocketOpen();
+  void create_ack_socks();
+  void check_for_ack(unsigned char);
+  vector<unsigned int> d_ack_rx_socks, d_ack_tx_socks;
 
   void make_time_tag(gr_message_sptr msg);
   int d_null_symbol_cnt;
@@ -501,6 +504,20 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
   void generatePreamble(gr_complex *out);
   int d_preambles_sent;
   const std::vector<std::vector<gr_complex> >   d_preamble;
+
+  /* maps are maintained for helping in socket creation. This will allow to maintain a map
+  of unique prevNodes and nextNodes for each node */
+  map<unsigned char, bool> d_prevNodeIds;
+  map<unsigned char, bool> d_nextNodeIds;
+
+
+  unsigned char d_flow;
+  FlowInfoVector d_flowInfoVector;
+  FlowInfo* getFlowInfo(bool create, unsigned char flowId);
+  void populateFlowInfo();
+
+  void populateRouteInfo();
+
 };
 
 #endif

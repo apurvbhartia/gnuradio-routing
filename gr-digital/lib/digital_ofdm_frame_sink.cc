@@ -46,7 +46,8 @@
 
 using namespace std;
 
-//#define SEND_ACK_ETHERNET 1
+#define SEND_ACK_ETHERNET 1
+#define UNASSIGNED 100
 
 #define VERBOSE 0
 #define LOG_H 1
@@ -376,7 +377,6 @@ digital_ofdm_frame_sink::digital_ofdm_frame_sink(const std::vector<gr_complex> &
     d_preamble_cnt(0)
 {
   std::string carriers = "F00F";                //8-DC subcarriers      // apurv++
-  //std::string carriers = "FC3F";		  // 4-dc
 
   // A bit hacky to fill out carriers to occupied_carriers length
   int diff = (d_occupied_carriers - 4*carriers.length());
@@ -509,14 +509,6 @@ digital_ofdm_frame_sink::digital_ofdm_frame_sink(const std::vector<gr_complex> &
   memset(d_phase, 0, sizeof(float) * MAX_BATCH_SIZE);
   memset(d_freq, 0, sizeof(float) * MAX_BATCH_SIZE);
 
-#ifdef SEND_ACK_ETHERNET
-  d_ack_sock = open_client_sock(9000, "128.83.141.213", false);
-  if(d_ack_sock != -1) {
-     printf("@ backend ethernet connected for ACK!\n"); fflush(stdout);
-  }
-#endif
-
-  
   int n_entries = pow(double (d_data_sym_position.size()), double(d_batch_size)); //pow(2.0, double(d_batch_size));
   std::string arg("");
   d_usrp = uhd::usrp::multi_usrp::make(arg);
@@ -534,6 +526,10 @@ digital_ofdm_frame_sink::digital_ofdm_frame_sink(const std::vector<gr_complex> &
 
   d_out_pkt_time = uhd::time_spec_t(0.0);
   d_last_pkt_time = uhd::time_spec_t(0.0);
+
+  populateFlowInfo();
+  populateRouteInfo();
+  create_ack_socks();
 }
 
 void
@@ -696,12 +692,13 @@ digital_ofdm_frame_sink::work (int noutput_items,
           printf("HEADER OK prev_hop: %d pkt_num: %d batch_num: %d dst_id: %d\n", d_header.prev_hop_id, d_header.pkt_num, d_header.batch_number, d_header.dst_id); fflush(stdout);
           extract_header();						// fills local fields with header info
 
-	  FlowInfo *flowInfo = getFlowInfo(true, d_flow);
+	  FlowInfo *flowInfo = getFlowInfo(false, d_flow);
 
 	  if(!shouldProcess()) {
 	      enter_search();
 	      break;
           }
+
 	  enter_have_header();
         }
         else {
@@ -733,7 +730,8 @@ digital_ofdm_frame_sink::work (int noutput_items,
     if(d_curr_ofdm_symbol_index == d_num_ofdm_symbols) {		// last ofdm symbol in pkt
 
        if(d_dst) {
-          demodulate_packet();
+          bool tx_ack = demodulate_packet();
+	  send_ack(d_flow, d_active_batch, tx_ack);
        }
        else {
           assert(d_fwd);
@@ -811,7 +809,7 @@ digital_ofdm_frame_sink::storePayload(gr_complex *in)
   memcpy(d_pktInfo->symbols + offset, in, sizeof(gr_complex) * d_occupied_carriers);
 }
 
-void
+bool
 digital_ofdm_frame_sink::demodulate_packet()
 {
   printf("demodulate\n"); fflush(stdout);
@@ -823,6 +821,8 @@ digital_ofdm_frame_sink::demodulate_packet()
   gr_complex *out_symbols = d_pktInfo->symbols;
   int packetlen_cnt = 0;
   unsigned char packet[MAX_PKT_LEN];
+  bool crc_valid = false;
+
   //printf("d_partial_byte: %d, d_byte_offset: %d\n", d_partial_byte, d_byte_offset); 
   for(unsigned int o = 0; o < d_num_ofdm_symbols; o++) {
       unsigned int offset = o * d_occupied_carriers;
@@ -839,9 +839,9 @@ digital_ofdm_frame_sink::demodulate_packet()
                gr_message_sptr msg = gr_make_message(0, d_packet_whitener_offset, 0, packetlen_cnt);
 	       memcpy(msg->msg(), packet, packetlen_cnt);
 
-	       bool crc_valid = crc_check(msg->to_string(), decoded_msg);
+	       crc_valid = crc_check(msg->to_string(), decoded_msg);
 	       if(crc_valid) d_num_pkts_correct++;
-	       printf("crc valid: %d, d_crc: %d\n", crc_valid, d_crc); fflush(stdout);		
+	       printf("crc valid: %d\n", crc_valid); fflush(stdout);		
 
                msg.reset();                            // free it up
            }
@@ -850,8 +850,16 @@ digital_ofdm_frame_sink::demodulate_packet()
 
   free(bytes_out);
 
-  printf("decoded batch: %d\t", d_active_batch); fflush(stdout);
+  d_total_pkts_received++;
+  if(crc_valid) {
+    d_num_pkts_correct++;
+    printf("crc valid: %d\n", crc_valid); fflush(stdout); 
+    d_last_batch_acked = d_active_batch;
+  }
+
+  printf("Batch OK: %d, Batch Id: %d, Total Pkts: %d, Correct: %d\t", crc_valid, d_active_batch, d_total_pkts_received, d_num_pkts_correct); fflush(stdout);
   print_msg(decoded_msg);  
+  return crc_valid;
 }
 
 
@@ -885,6 +893,17 @@ digital_ofdm_frame_sink::shouldProcess() {
   d_dst = true;
   return true;
 }
+
+void
+digital_ofdm_frame_sink::prepareForNewBatch() {
+  printf("prepareForNewBatch, batch: %d\n", d_header.batch_number); fflush(stdout);
+  d_active_batch = d_header.batch_number;
+
+  FlowInfo *flow_info = getFlowInfo(false, d_flow);
+  flow_info->active_batch = d_active_batch;
+  flow_info->last_batch_acked = flow_info->active_batch - 1;
+}
+
 
 inline PktInfo*
 digital_ofdm_frame_sink::createPktInfo() {
@@ -927,6 +946,34 @@ digital_ofdm_frame_sink::getFlowInfo(bool create, unsigned char flowId)
   }
 
   return flow_info; 
+}
+
+inline void
+digital_ofdm_frame_sink::populateFlowInfo() {
+    // flowId	srcId	dstId //
+   printf("populateFlowInfo\n"); fflush(stdout);
+   FILE *fl = fopen ( "flow.txt" , "r+" );
+   if (fl==NULL) {
+        fprintf (stderr, "File error\n");
+        assert(false);
+   }
+
+   char line[128];
+   const char *delim = " ";
+   while ( fgets ( line, sizeof(line), fl ) != NULL ) {
+        char *strtok_res = strtok(line, delim);
+        vector<char*> token;
+        while (strtok_res != NULL) {
+           token.push_back(strtok_res);
+           strtok_res = strtok (NULL, delim);
+        }
+	
+	FlowInfo *fInfo = getFlowInfo(true, atoi(token[0]+'0'));
+	fInfo->src = atoi(token[1]+'0');
+ 	fInfo->dst = atoi(token[2]+'0');
+   }
+
+   fclose (fl);
 }
 
 /* handle the 'lead sender' case */
@@ -1059,10 +1106,11 @@ digital_ofdm_frame_sink::findCreditInfo(unsigned char flowId) {
 
   return NULL;
 }
+#endif
 
 /* sends the ACK on the backend ethernet */
 void 
-digital_ofdm_frame_sink::send_ack(unsigned char flow, unsigned char batch) {
+digital_ofdm_frame_sink::send_ack(unsigned char flow, unsigned char batch, bool ack) {
   MULTIHOP_ACK_HDR_TYPE ack_header;
 
   memset(&ack_header, 0, sizeof(ack_header));
@@ -1070,12 +1118,13 @@ digital_ofdm_frame_sink::send_ack(unsigned char flow, unsigned char batch) {
   FlowInfo *flowInfo = getFlowInfo(false, flow);
   assert(flowInfo);
 
-  ack_header.src_id = flowInfo->src;                                    // flow-src
-  ack_header.dst_id = flowInfo->dst;                                    // flow-dst
+  ack_header.src_id = d_id;
+  ack_header.dst_id = flowInfo->prevNodeId;
 
-  ack_header.prev_hop_id = d_id;
   ack_header.batch_number = flowInfo->active_batch;                     // active-batch got ACKed
-  ack_header.pkt_type = ACK_TYPE;
+  if(ack) ack_header.pkt_type = ACK_TYPE;
+  else ack_header.pkt_type = NACK_TYPE;
+
   ack_header.flow_id = flow;
 
   for(int i = 0; i < PADDING_SIZE; i++)
@@ -1084,14 +1133,14 @@ digital_ofdm_frame_sink::send_ack(unsigned char flow, unsigned char batch) {
   char ack_buf[ACK_HEADERDATALEN];
   memcpy(ack_buf, &ack_header, ACK_HEADERDATALEN);
 
-  // send on the backend //
-  if (send(d_ack_sock, (char *)&ack_buf[0], sizeof(ack_buf), 0) < 0) {
-    printf("Error: failed to send ACK\n");
-    //exit(1);
-  } else
-    printf("@@@@@@@@@@@@@@@@ sent ACK (%d bytes) for batch %d @@@@@@@@@@@@@@@@@@@@\n", ACK_HEADERDATALEN, flowInfo->active_batch); fflush(stdout);
+  // transmit an ACK on all sockets (FIXME) - right now I cannot get the socket for a specific client //
+  for(int i = 0; i < d_ack_tx_socks.size(); i++) {
+     if (send(d_ack_tx_socks[i], (char *)&ack_buf[0], sizeof(ack_buf), 0) < 0) {
+         assert(false);
+     } 
+  }
+  printf("@@@@@@@@@@@@@@@@ sent ACK (%d bytes) for batch %d @@@@@@@@@@@@@@@@@@@@\n", ACK_HEADERDATALEN, flowInfo->active_batch); fflush(stdout);
 }
-#endif
 
 void
 digital_ofdm_frame_sink::whiten(unsigned char *bytes, const int len)
@@ -1366,4 +1415,93 @@ digital_ofdm_frame_sink::open_client_sock(int port, const char *addr, bool block
   /* Connecting to server */
   connect(sockfd, (struct sockaddr*)&dest, sizeof(struct sockaddr_in));
   return sockfd;
+}
+
+/* d_ack_tx_socks (clients to which I will send an ACK)
+   d_ack_rx_socks (servers from which I will receive an ACK)
+   all clients/servers must be unique 
+*/
+inline void
+digital_ofdm_frame_sink::create_ack_socks() {
+  // clients to which I will send an ACK // 
+  int num_clients = d_prevNodeIds.size();
+  EthInfoMap::iterator e_it = d_ethInfoMap.find(d_id);
+  assert(e_it != d_ethInfoMap.end());
+  EthInfo *ethInfo = (EthInfo*) e_it->second;
+  open_server_sock(ethInfo->port, d_ack_tx_socks, num_clients);
+
+  // connect to servers from which I will receive an ACK //
+  map<unsigned char, bool>:: iterator it = d_nextNodeIds.begin();
+  while(it != d_nextNodeIds.end()) {
+     NodeId nodeId = it->first;
+     e_it = d_ethInfoMap.find(nodeId); 
+     assert(e_it != d_ethInfoMap.end());
+     ethInfo = (EthInfo*) e_it->second;
+     int rx_sock = open_client_sock(ethInfo->port, ethInfo->addr, false);
+     d_ack_rx_socks.push_back(rx_sock);
+     it++;
+  }
+  assert(d_ack_rx_socks.size() == d_nextNodeIds.size());
+}
+
+/* read shortest path info */
+inline void
+digital_ofdm_frame_sink::populateRouteInfo() {
+   // flow	num_nodes	src	fwd..	dst //
+   FILE *fl = fopen ( "route.txt" , "r+" );
+   if (fl==NULL) {
+        fprintf (stderr, "File error\n");
+        exit (1);
+   }
+
+   char line[128];
+   const char *delim = " ";
+   while ( fgets ( line, sizeof(line), fl ) != NULL ) {
+        char *strtok_res = strtok(line, delim);
+        vector<char*> token_vec;
+        while (strtok_res != NULL) {
+           token_vec.push_back(strtok_res);
+           //printf ("%s\n", strtok_res);
+           strtok_res = strtok (NULL, delim);
+        }
+	int num_nodes = atoi(token_vec[1]);
+        printf("num_nodes: %d\n", num_nodes); fflush(stdout);
+
+        printf("size: %d\n", token_vec.size()); fflush(stdout);
+
+	unsigned char flowId = atoi(token_vec[0])+'0';
+	printf("flow: %c\n", flowId); fflush(stdout);
+
+	FlowInfo *flowInfo = getFlowInfo(false, flowId);
+
+	NodeId src = atoi(token_vec[2]) + '0';
+	NodeId dst = atoi(token_vec[num_nodes-1]) + '0';
+	assert(flowInfo->src == src && flowInfo->dst == dst); 			// sanity
+
+        for(int i = 0; i < num_nodes; i++) {
+           NodeId nodeId = atoi(token_vec[i+2]) + '0';
+	   if(nodeId == d_id) {
+	      if(i == 0) {
+		 flowInfo->nextNodeId = atoi(token_vec[i+3]) + '0';		// next entry
+		 flowInfo->prevNodeId = UNASSIGNED;				// unassigned
+		 d_nextNodeIds.insert(std::pair<unsigned char, bool> (flowInfo->nextNodeId, true));
+	      }
+	      else if(i != num_nodes-1) {
+		 flowInfo->nextNodeId = UNASSIGNED;					// unassigned
+		 flowInfo->prevNodeId = atoi(token_vec[i+1]) + '0';		// previous entry
+		 d_prevNodeIds.insert(std::pair<unsigned char, bool> (flowInfo->prevNodeId, true));
+	      }
+	      else {
+		 flowInfo->nextNodeId = atoi(token_vec[i+3]) + '0';             // next entry
+		 flowInfo->prevNodeId = atoi(token_vec[i+1]) + '0';             // previous entry
+		 d_nextNodeIds.insert(std::pair<unsigned char, bool> (flowInfo->nextNodeId, true));
+		 d_prevNodeIds.insert(std::pair<unsigned char, bool> (flowInfo->prevNodeId, true));
+	      }
+	      break;
+	   }
+        }
+
+        printf("\n");
+   }
+   fclose (fl);
 }
