@@ -527,6 +527,7 @@ digital_ofdm_frame_sink::digital_ofdm_frame_sink(const std::vector<gr_complex> &
   d_out_pkt_time = uhd::time_spec_t(0.0);
   d_last_pkt_time = uhd::time_spec_t(0.0);
 
+  populateEthernetAddress();
   populateFlowInfo();
   populateRouteInfo();
   create_ack_socks();
@@ -700,6 +701,7 @@ digital_ofdm_frame_sink::work (int noutput_items,
           }
 
 	  enter_have_header();
+	  prepareForNewBatch();
         }
         else {
           printf("HEADER NOT OK --\n"); fflush(stdout);
@@ -948,34 +950,6 @@ digital_ofdm_frame_sink::getFlowInfo(bool create, unsigned char flowId)
   return flow_info; 
 }
 
-inline void
-digital_ofdm_frame_sink::populateFlowInfo() {
-    // flowId	srcId	dstId //
-   printf("populateFlowInfo\n"); fflush(stdout);
-   FILE *fl = fopen ( "flow.txt" , "r+" );
-   if (fl==NULL) {
-        fprintf (stderr, "File error\n");
-        assert(false);
-   }
-
-   char line[128];
-   const char *delim = " ";
-   while ( fgets ( line, sizeof(line), fl ) != NULL ) {
-        char *strtok_res = strtok(line, delim);
-        vector<char*> token;
-        while (strtok_res != NULL) {
-           token.push_back(strtok_res);
-           strtok_res = strtok (NULL, delim);
-        }
-	
-	FlowInfo *fInfo = getFlowInfo(true, atoi(token[0]+'0'));
-	fInfo->src = atoi(token[1]+'0');
- 	fInfo->dst = atoi(token[2]+'0');
-   }
-
-   fclose (fl);
-}
-
 /* handle the 'lead sender' case */
 void
 digital_ofdm_frame_sink::makeHeader(MULTIHOP_HDR_TYPE &header, unsigned char *header_bytes, FlowInfo *flowInfo, unsigned int nextLinkId)
@@ -1135,7 +1109,7 @@ digital_ofdm_frame_sink::send_ack(unsigned char flow, unsigned char batch, bool 
 
   // transmit an ACK on all sockets (FIXME) - right now I cannot get the socket for a specific client //
   for(int i = 0; i < d_ack_tx_socks.size(); i++) {
-     if (send(d_ack_tx_socks[i], (char *)&ack_buf[0], sizeof(ack_buf), 0) < 0) {
+     if (send(d_ack_tx_socks[i], (char *)&ack_buf[0], ACK_HEADERDATALEN, 0) < 0) {
          assert(false);
      } 
   }
@@ -1430,6 +1404,7 @@ digital_ofdm_frame_sink::create_ack_socks() {
   EthInfo *ethInfo = (EthInfo*) e_it->second;
   open_server_sock(ethInfo->port, d_ack_tx_socks, num_clients);
 
+#if 0
   // connect to servers from which I will receive an ACK //
   map<unsigned char, bool>:: iterator it = d_nextNodeIds.begin();
   while(it != d_nextNodeIds.end()) {
@@ -1442,6 +1417,7 @@ digital_ofdm_frame_sink::create_ack_socks() {
      it++;
   }
   assert(d_ack_rx_socks.size() == d_nextNodeIds.size());
+#endif
 }
 
 /* read shortest path info */
@@ -1486,7 +1462,7 @@ digital_ofdm_frame_sink::populateRouteInfo() {
 		 flowInfo->prevNodeId = UNASSIGNED;				// unassigned
 		 d_nextNodeIds.insert(std::pair<unsigned char, bool> (flowInfo->nextNodeId, true));
 	      }
-	      else if(i != num_nodes-1) {
+	      else if(i == num_nodes-1) {
 		 flowInfo->nextNodeId = UNASSIGNED;					// unassigned
 		 flowInfo->prevNodeId = atoi(token_vec[i+1]) + '0';		// previous entry
 		 d_prevNodeIds.insert(std::pair<unsigned char, bool> (flowInfo->prevNodeId, true));
@@ -1503,5 +1479,33 @@ digital_ofdm_frame_sink::populateRouteInfo() {
 
         printf("\n");
    }
+   fclose (fl);
+}
+
+inline void
+digital_ofdm_frame_sink::populateFlowInfo() {
+    // flowId   srcId   dstId //
+   printf("populateFlowInfo\n"); fflush(stdout);
+   FILE *fl = fopen ( "flow.txt" , "r+" );
+   if (fl==NULL) {
+        fprintf (stderr, "File error\n");
+        assert(false);
+   }
+
+   char line[128];
+   const char *delim = " ";
+   while ( fgets ( line, sizeof(line), fl ) != NULL ) {
+        char *strtok_res = strtok(line, delim);
+        vector<char*> token;
+        while (strtok_res != NULL) {
+           token.push_back(strtok_res);
+           strtok_res = strtok (NULL, delim);
+        }
+
+        FlowInfo *fInfo = getFlowInfo(true, atoi(token[0])+'0');
+        fInfo->src = atoi(token[1])+'0';
+        fInfo->dst = atoi(token[2])+'0';
+   }
+
    fclose (fl);
 }

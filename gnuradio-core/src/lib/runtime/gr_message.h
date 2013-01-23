@@ -83,13 +83,13 @@ typedef struct multihop_hdr_type {
 
 #pragma pack(1)
 typedef struct ack_multihop_hdr_type {
+  
+  unsigned char src_id, dst_id;
+  unsigned short batch_number;
 
   // 3 bytes
-  unsigned char pkt_type : 1;
+  unsigned char pkt_type : 4;
   unsigned char flow_id : 4;
-  unsigned short batch_number : 11;
-  unsigned char src_id : 4;
-  unsigned char dst_id  : 4;
 
   // 6 bytes 
   unsigned char pad[ACK_PADDING_SIZE];                 // to ensure size % (occupied_carriers-dc_carriers) = 0

@@ -367,7 +367,7 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
 
   /* ack */
   static const int ACK_HEADERBYTELEN = sizeof(MULTIHOP_ACK_HDR_TYPE);
-  static const int ACK_HEADERDATALEN = ACK_HEADERBYTELEN - ACK_PADDING_SIZE-4;
+  static const int ACK_HEADERDATALEN = ACK_HEADERBYTELEN - ACK_PADDING_SIZE;
 
   std::vector<gr_complex> d_hdr_constellation;
   unsigned long  d_hdr_nbits;

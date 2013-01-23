@@ -213,6 +213,7 @@ digital_ofdm_mapper_bcv::digital_ofdm_mapper_bcv (const std::vector<gr_complex> 
 
   populateFlowInfo();
   populateRouteInfo();
+  populateEthernetAddress();
   create_ack_socks();
 }
 
@@ -301,24 +302,31 @@ int digital_ofdm_mapper_bcv::randsym()
 
 inline void
 digital_ofdm_mapper_bcv::check_for_ack(unsigned char flowId) {
-  int buf_size = sizeof(d_ack_buf);
-  memset(d_ack_buf, 0, buf_size);
+  char ack_buf[ACK_HEADERDATALEN];
+  int buf_size = ACK_HEADERDATALEN;
+  memset(ack_buf, 0, buf_size);
 
   int n_extracted = 0;
   int rx_sock = d_ack_rx_socks[0];
-
-  int nbytes = recv(rx_sock, d_ack_buf, buf_size, MSG_PEEK);
-  NodeId rxId[2];
+  printf("check_for_ack, rx_sock: %d\n", rx_sock); fflush(stdout);
+  bool found_ack = false;
+  int nbytes = recv(rx_sock, ack_buf, buf_size, MSG_PEEK);
   if(nbytes > 0) {
+
+  //while(!found_ack) 
       int offset = 0;
+      //int nbytes = recv(rx_sock, ack_buf, buf_size, MSG_PEEK);
+      //if(nbytes <= 0) continue;
       while(1) {
-         nbytes = recv(rx_sock, d_ack_buf+offset, buf_size-offset, 0);
+         nbytes = recv(rx_sock, ack_buf+offset, buf_size-offset, 0);
          if(nbytes > 0) offset += nbytes;
          if(offset == buf_size) {
 
+	     found_ack = true;
 	     MULTIHOP_ACK_HDR_TYPE ack;
-       	     memcpy(&ack, d_ack_buf, sizeof(d_ack_buf));
+       	     memcpy(&ack, ack_buf, buf_size);
 
+	     printf("ACK received - pkt_type: %d, dst: %c\n", ack.pkt_type, ack.dst_id); fflush(stdout);
 	     if(ack.pkt_type == ACK_TYPE && ack.flow_id == flowId && ack.dst_id == d_id) {
 	        if(d_batch_to_send <= ack.batch_number) {
         	      d_batch_to_send = ack.batch_number + 1;
@@ -334,8 +342,8 @@ digital_ofdm_mapper_bcv::check_for_ack(unsigned char flowId) {
 
             n_extracted++;
 	    // see if there's another packet //
-	    memset(d_ack_buf, 0, buf_size);
-	    nbytes = recv(rx_sock, d_ack_buf, buf_size, MSG_PEEK);
+	    memset(ack_buf, 0, buf_size);
+	    nbytes = recv(rx_sock, ack_buf, buf_size, MSG_PEEK);
 	    if(nbytes > 0) {
 		offset = 0; 
 		continue;
@@ -345,7 +353,6 @@ digital_ofdm_mapper_bcv::check_for_ack(unsigned char flowId) {
       }
       assert(offset == buf_size);
    }
-  
    printf("check_for_ack - flowId: %c, n_extracted: %d\n", flowId, n_extracted); 
 }
 
@@ -850,8 +857,6 @@ digital_ofdm_mapper_bcv::openACKSocket() {
     printf("ACK Socket OPEN error\n"); fflush(stdout);
   }
 
-  /* allocate d_ack_buf */
-  d_ack_buf = (char*) malloc(sizeof(char) * sizeof(ACK_HEADERDATALEN));
   return sockfd;
 }
 
@@ -970,11 +975,16 @@ digital_ofdm_mapper_bcv::open_client_sock(int port, const char *addr, bool block
   int sockfd;
   struct sockaddr_in dest;
 
+  struct timeval tv;
+  tv.tv_sec = 1;
+  tv.tv_usec = 5e5;
+
   /* create socket */
   sockfd = socket(PF_INET, SOCK_STREAM, 0);
   if(!blocking)
      fcntl(sockfd, F_SETFL, O_NONBLOCK);
 
+  assert(setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (char *)&tv,sizeof(struct timeval))==0);
   assert(sockfd != -1);
 
   /* initialize value in dest */
@@ -1032,21 +1042,33 @@ digital_ofdm_mapper_bcv::populateEthernetAddress()
 */
 inline void
 digital_ofdm_mapper_bcv::create_ack_socks() {
+  printf("create_ack_socks\n"); fflush(stdout);
+  EthInfoMap::iterator e_it;
+  EthInfo *ethInfo = NULL;
+#if 0
   // clients to which I will send an ACK // 
   int num_clients = d_prevNodeIds.size();
   EthInfoMap::iterator e_it = d_ethInfoMap.find(d_id);
   assert(e_it != d_ethInfoMap.end());
   EthInfo *ethInfo = (EthInfo*) e_it->second;
   open_server_sock(ethInfo->port, d_ack_tx_socks, num_clients);
+#endif
 
   // connect to servers from which I will receive an ACK //
   map<unsigned char, bool>:: iterator it = d_nextNodeIds.begin();
+
+  //struct timeval tv;
+  //tv.tv_sec = 1;
+  //tv.tv_usec = 5e5;
+
   while(it != d_nextNodeIds.end()) {
      NodeId nodeId = it->first;
      e_it = d_ethInfoMap.find(nodeId); 
      assert(e_it != d_ethInfoMap.end());
      ethInfo = (EthInfo*) e_it->second;
-     int rx_sock = open_client_sock(ethInfo->port, ethInfo->addr, false);
+     int rx_sock = open_client_sock(ethInfo->port, ethInfo->addr, true);
+
+     //assert(setsockopt(rx_sock, SOL_SOCKET, SO_RCVTIMEO, (char *)&tv,sizeof(struct timeval))==0);
      d_ack_rx_socks.push_back(rx_sock);
      it++;
   }
@@ -1085,6 +1107,8 @@ digital_ofdm_mapper_bcv::populateRouteInfo() {
 
 	NodeId src = atoi(token_vec[2]) + '0';
 	NodeId dst = atoi(token_vec[num_nodes-1]) + '0';
+
+	printf("src: %c, dst: %c, flowInfo.src: %c, flowInfo.dst: %c\n", src, dst, flowInfo->src, flowInfo->dst); fflush(stdout);
 	assert(flowInfo->src == src && flowInfo->dst == dst); 			// sanity
 
         for(int i = 0; i < num_nodes; i++) {
@@ -1152,15 +1176,19 @@ digital_ofdm_mapper_bcv::populateFlowInfo() {
    const char *delim = " ";
    while ( fgets ( line, sizeof(line), fl ) != NULL ) {
         char *strtok_res = strtok(line, delim);
-        vector<char*> token;
+        vector<char*> token_vec;
         while (strtok_res != NULL) {
-           token.push_back(strtok_res);
+           token_vec.push_back(strtok_res);
+	   //printf ("%s\n", strtok_res);
            strtok_res = strtok (NULL, delim);
         }
 	
-	FlowInfo *fInfo = getFlowInfo(true, atoi(token[0]+'0'));
-	fInfo->src = atoi(token[1]+'0');
- 	fInfo->dst = atoi(token[2]+'0');
+	unsigned char flowId = atoi(token_vec[0])+'0';
+	FlowInfo *fInfo = getFlowInfo(true, flowId);
+      
+	fInfo->src = atoi(token_vec[1])+'0';
+ 	fInfo->dst = atoi(token_vec[2])+'0';
+	printf("flowId: %c, src: %c, dst: %c\n", flowId, fInfo->src, fInfo->dst); 
    }
 
    fclose (fl);
