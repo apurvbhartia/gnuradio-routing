@@ -364,8 +364,6 @@ digital_ofdm_frame_sink::digital_ofdm_frame_sink(const std::vector<gr_complex> &
     d_resid(0), d_nresid(0),d_phase_gain(phase_gain),d_freq_gain(freq_gain),
     d_eq_gain(0.05), 
     d_batch_size(batch_size),
-    d_active_batch(-1),
-    d_last_batch_acked(-1),
     d_pkt_num(0),
     d_id(id+'0'),
     d_fft_length(fft_length),
@@ -521,9 +519,6 @@ digital_ofdm_frame_sink::digital_ofdm_frame_sink(const std::vector<gr_complex> &
 
   fill_all_carriers_map();   
 
-  d_num_pkts_correct = 0;
-  d_total_pkts_received = 0;
-
   d_out_pkt_time = uhd::time_spec_t(0.0);
   d_last_pkt_time = uhd::time_spec_t(0.0);
 
@@ -625,8 +620,7 @@ digital_ofdm_frame_sink::work (int noutput_items,
   if (VERBOSE)
     fprintf(stderr,">>> Entering state machine, d_state: %d\n", d_state);
 
-  unsigned ii = 0;
-
+  FlowInfo *flowInfo = NULL;
   unsigned int bytes=0;
   unsigned int n_data_carriers = d_data_carriers.size();
   int count = 0;
@@ -693,15 +687,14 @@ digital_ofdm_frame_sink::work (int noutput_items,
           printf("HEADER OK prev_hop: %d pkt_num: %d batch_num: %d dst_id: %d\n", d_header.prev_hop_id, d_header.pkt_num, d_header.batch_number, d_header.dst_id); fflush(stdout);
           extract_header();						// fills local fields with header info
 
-	  FlowInfo *flowInfo = getFlowInfo(false, d_flow);
-
-	  if(!shouldProcess()) {
+	  flowInfo = getFlowInfo(false, d_flow);
+	  if(!shouldProcess(flowInfo)) {
 	      enter_search();
 	      break;
           }
 
 	  enter_have_header();
-	  prepareForNewBatch();
+	  prepareForNewBatch(flowInfo);
         }
         else {
           printf("HEADER NOT OK --\n"); fflush(stdout);
@@ -731,14 +724,13 @@ digital_ofdm_frame_sink::work (int noutput_items,
 
     if(d_curr_ofdm_symbol_index == d_num_ofdm_symbols) {		// last ofdm symbol in pkt
 
-       if(d_dst) {
-          bool tx_ack = demodulate_packet();
-	  send_ack(d_flow, d_active_batch, tx_ack);
-       }
-       else {
-          assert(d_fwd);
-	  //updateCredit();
-	  //makePacket(true);
+       std::string decoded_msg;
+       flowInfo = getFlowInfo(false, d_flow);
+       bool tx_ack = demodulate_packet(decoded_msg, flowInfo);
+       send_ack(tx_ack, flowInfo);
+       if(tx_ack && d_fwd) {
+	  //updateCredit?
+	  makePacket(decoded_msg, flowInfo);
        }
 
        resetPktInfo(d_pktInfo);
@@ -812,13 +804,12 @@ digital_ofdm_frame_sink::storePayload(gr_complex *in)
 }
 
 bool
-digital_ofdm_frame_sink::demodulate_packet()
+digital_ofdm_frame_sink::demodulate_packet(std::string& decoded_msg, FlowInfo *fInfo)
 {
   printf("demodulate\n"); fflush(stdout);
 
   // run the demapper now: demap each packet within the batch //
   unsigned char *bytes_out = (unsigned char*) malloc(sizeof(unsigned char) * d_occupied_carriers);
-  std::string decoded_msg;
 
   gr_complex *out_symbols = d_pktInfo->symbols;
   int packetlen_cnt = 0;
@@ -842,7 +833,6 @@ digital_ofdm_frame_sink::demodulate_packet()
 	       memcpy(msg->msg(), packet, packetlen_cnt);
 
 	       crc_valid = crc_check(msg->to_string(), decoded_msg);
-	       if(crc_valid) d_num_pkts_correct++;
 	       printf("crc valid: %d\n", crc_valid); fflush(stdout);		
 
                msg.reset();                            // free it up
@@ -852,14 +842,14 @@ digital_ofdm_frame_sink::demodulate_packet()
 
   free(bytes_out);
 
-  d_total_pkts_received++;
+  fInfo->total_pkts_rcvd++;
   if(crc_valid) {
-    d_num_pkts_correct++;
+    fInfo->num_pkts_correct++;
     printf("crc valid: %d\n", crc_valid); fflush(stdout); 
-    d_last_batch_acked = d_active_batch;
+    fInfo->last_batch_acked = fInfo->active_batch;
   }
 
-  printf("Batch OK: %d, Batch Id: %d, Total Pkts: %d, Correct: %d\t", crc_valid, d_active_batch, d_total_pkts_received, d_num_pkts_correct); fflush(stdout);
+  printf("Flow: %c, Batch OK: %d, Batch Id: %d, Total Pkts: %d, Correct: %d\t", fInfo->flowId, crc_valid, fInfo->active_batch, fInfo->total_pkts_rcvd, fInfo->num_pkts_correct); fflush(stdout);
   print_msg(decoded_msg);  
   return crc_valid;
 }
@@ -891,19 +881,27 @@ digital_ofdm_frame_sink::open_hestimates_log()
    - a triggered forwarder
 */
 bool
-digital_ofdm_frame_sink::shouldProcess() {
+digital_ofdm_frame_sink::shouldProcess(FlowInfo *fInfo) {
   d_dst = true;
+
+  if(fInfo->last_batch_acked == -1)
+     return true;
+
+  if(fInfo->last_batch_acked >= d_batch_number) {
+    printf("--shouldProcess: false, batch: %d, last_acked_batch: %d\n", d_batch_number, fInfo->last_batch_acked);
+    fflush(stdout);
+    return false;
+  }
+
+  printf("--shouldProcess: true, batch: %d, last_acked_batch: %d\n", d_batch_number, fInfo->last_batch_acked);
   return true;
 }
 
 void
-digital_ofdm_frame_sink::prepareForNewBatch() {
+digital_ofdm_frame_sink::prepareForNewBatch(FlowInfo *fInfo) {
   printf("prepareForNewBatch, batch: %d\n", d_header.batch_number); fflush(stdout);
-  d_active_batch = d_header.batch_number;
-
-  FlowInfo *flow_info = getFlowInfo(false, d_flow);
-  flow_info->active_batch = d_active_batch;
-  flow_info->last_batch_acked = flow_info->active_batch - 1;
+  fInfo->active_batch = d_batch_number;
+  fInfo->pkts_fwded = 0;
 }
 
 
@@ -944,6 +942,7 @@ digital_ofdm_frame_sink::getFlowInfo(bool create, unsigned char flowId)
      flow_info = (FlowInfo*) malloc(sizeof(FlowInfo));
      memset(flow_info, 0, sizeof(FlowInfo));
      flow_info->pkts_fwded = 0;
+     flow_info->last_batch_acked = -1;
      d_flowInfoVector.push_back(flow_info);
   }
 
@@ -952,18 +951,19 @@ digital_ofdm_frame_sink::getFlowInfo(bool create, unsigned char flowId)
 
 /* handle the 'lead sender' case */
 void
-digital_ofdm_frame_sink::makeHeader(MULTIHOP_HDR_TYPE &header, unsigned char *header_bytes, FlowInfo *flowInfo, unsigned int nextLinkId)
+digital_ofdm_frame_sink::makeHeader(unsigned char *header_bytes, FlowInfo *flowInfo)
 {
+   MULTIHOP_HDR_TYPE header;
    printf("batch#: %d, makeHeader for pkt: %d, len: %d\n", flowInfo->active_batch, d_pkt_num, d_packetlen); fflush(stdout);
    header.src_id = flowInfo->src; 
    header.dst_id = flowInfo->dst;       
    header.prev_hop_id = d_id;	
    header.batch_number = flowInfo->active_batch;
 
-   header.packetlen = d_packetlen;// - 1;                // -1 for '55' appended (TODO)
+   header.packetlen = d_packetlen;
    header.pkt_type = DATA_TYPE;
    header.pkt_num = d_pkt_num;
-   header.link_id = nextLinkId;
+   header.link_id = 0;				// dumb field - might use later
 
    flowInfo->pkts_fwded++;
 
@@ -986,7 +986,7 @@ digital_ofdm_frame_sink::makeHeader(MULTIHOP_HDR_TYPE &header, unsigned char *he
    //debugHeader(header_bytes);
 }
 
-
+#if 0
 void
 digital_ofdm_frame_sink::debugHeader(unsigned char *header_bytes)
 {
@@ -999,68 +999,6 @@ digital_ofdm_frame_sink::debugHeader(unsigned char *header_bytes)
 
    printf("batch#: %d, debug crc: %u\n", header.batch_number, header.hdr_crc);
    whiten(header_bytes, HEADERBYTELEN);
-}
-
-
-#if 0
-/* called from the outside directly by the wrapper, asking for any pkt to forward */
-void
-digital_ofdm_frame_sink::makePacket(bool sync_send)
-{
-   printf("makePacket syncSend: %d\n", sync_send); fflush(stdout);
-   /* check if any ACKs need to be sent out first */
-   int count = d_ack_queue.size();
-   if(count > 0) {// && num_acks_sent == 0) {				
-	printf("sink::makePacket - ACK to send count: %d\n", count); fflush(stdout); 
-	gr_message_sptr out_msg = d_ack_queue.front();
-	d_out_queue->insert_tail(out_msg);
-	d_ack_queue.pop_front();
-	out_msg.reset();
-	num_acks_sent++;
-	return;	
-   } 
-
-  
-   /* check if any data needs to be sent out */
-   /* credit check*/
-   count = d_creditInfoVector.size();
-   CreditInfo* creditInfo = NULL;
-   bool found = false;
-   if(count > 0) {
-	for(int i = 0; i < count; i++) {
-	   creditInfo = d_creditInfoVector[i];
-	   if(creditInfo->previousLink.linkId == d_prevLinkId) {
-		found = true; break;
-	   }
-	   /*
-	   if(creditInfo->credit >= 1.0) {
-	 	found = true;
-		break;
-	   } */
-	}
-   } 
-
-   /* credit >= 1.0 found, packet needs to be created! */
-   if(found){// && num_data_fwd == 0) {
-	assert(creditInfo);
-	printf("sink::makePacket - DATA to send, flow: %d\n", creditInfo->flowId); fflush(stdout);
-
-        /* create the pkt now! */
-        FlowInfo *flowInfo = getFlowInfo(false, creditInfo->flowId);
-        assert(flowInfo);
-
-	if(sync_send && 0) {
-	   test_sync_send(creditInfo);
-	}
-	else {
-	   encodePktToFwd(creditInfo, sync_send);
-	}
-	creditInfo->credit -= 1.0;				
-	//printf("sink::makePacket - DATA end\n"); fflush(stdout);
-	num_data_fwd++;
-	return;
-   }
-   //printf("sink::makePacket - nothing to send\n"); fflush(stdout);
 }
 
 inline CreditInfo*
@@ -1084,14 +1022,10 @@ digital_ofdm_frame_sink::findCreditInfo(unsigned char flowId) {
 
 /* sends the ACK on the backend ethernet */
 void 
-digital_ofdm_frame_sink::send_ack(unsigned char flow, unsigned char batch, bool ack) {
+digital_ofdm_frame_sink::send_ack(bool ack, FlowInfo *flowInfo) {
   MULTIHOP_ACK_HDR_TYPE ack_header;
-
   memset(&ack_header, 0, sizeof(ack_header));
  
-  FlowInfo *flowInfo = getFlowInfo(false, flow);
-  assert(flowInfo);
-
   ack_header.src_id = d_id;
   ack_header.dst_id = flowInfo->prevNodeId;
 
@@ -1099,7 +1033,7 @@ digital_ofdm_frame_sink::send_ack(unsigned char flow, unsigned char batch, bool 
   if(ack) ack_header.pkt_type = ACK_TYPE;
   else ack_header.pkt_type = NACK_TYPE;
 
-  ack_header.flow_id = flow;
+  ack_header.flow_id = flowInfo->flowId;
 
   for(int i = 0; i < PADDING_SIZE; i++)
        ack_header.pad[i] = 0;
@@ -1114,6 +1048,19 @@ digital_ofdm_frame_sink::send_ack(unsigned char flow, unsigned char batch, bool 
      } 
   }
   printf("@@@@@@@@@@@@@@@@ sent ACK (%d bytes) for batch %d @@@@@@@@@@@@@@@@@@@@\n", ACK_HEADERDATALEN, flowInfo->active_batch); fflush(stdout);
+}
+
+void
+digital_ofdm_frame_sink::makePacket(std::string msg, FlowInfo *flowInfo) {
+  gr_message_sptr out_msg = gr_make_message(DATA_TYPE, 0, 0, d_packetlen);
+  unsigned char header_bytes[HEADERBYTELEN];
+
+  makeHeader(header_bytes, flowInfo);
+  memcpy(out_msg->msg(), header_bytes, HEADERBYTELEN);
+  memcpy(out_msg->msg()+HEADERBYTELEN, (unsigned char*) msg.data(), d_packetlen);	// data contains the crc 
+
+  d_out_queue->insert_tail(out_msg);
+  out_msg.reset();
 }
 
 void

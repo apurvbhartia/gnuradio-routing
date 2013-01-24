@@ -43,6 +43,10 @@
 #define ACK_TYPE        2 //1
 #define NACK_TYPE    3
 
+#define REQUEST_INIT_MSG 1
+#define REPLY_MSG 2
+#define REQUEST_COMPLETE_MSG 3
+
 #define MAX_RX 3
 //#define H_PRECODING 1
 
@@ -115,11 +119,24 @@ typedef struct flow_info_str {
   NodeId src, dst, prevNodeId, nextNodeId;
   unsigned char flowId;
   unsigned int active_batch;
-  unsigned int last_batch_acked;
-  unsigned int pkts_fwded;
+  int last_batch_acked;
+  unsigned int pkts_fwded;			// for the active_batch //
+
+  unsigned int total_pkts_rcvd;
+  unsigned int num_pkts_correct;
 } FlowInfo;
 
 typedef std::vector<FlowInfo*> FlowInfoVector;
+
+/* medium availability */
+#pragma pack(1)
+typedef struct scheduler_msg {
+  int request_id;
+  NodeId nodeId;
+  int type;
+} SchedulerMsg;
+
+
 
 class gr_message;
 typedef boost::shared_ptr<gr_message> gr_message_sptr;

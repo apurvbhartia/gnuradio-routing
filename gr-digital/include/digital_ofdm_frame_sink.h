@@ -468,10 +468,7 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
   unsigned int d_curr_ofdm_symbol_index;
   unsigned int d_num_ofdm_symbols;
   unsigned int d_num_hdr_ofdm_symbols;
-
   unsigned int d_batch_size;
-  int d_active_batch;
-  int d_last_batch_acked;
   
   unsigned int d_hdr_byte_offset;
   unsigned char d_header_bytes[HEADERBYTELEN]; 
@@ -494,7 +491,7 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
 
   /* fwd/dst identification */
   bool d_fwd, d_dst;
-  bool shouldProcess();  
+  bool shouldProcess(FlowInfo*);  
   bool isMyPacket();
 
   /* internal store, stores the innovative packets seen for this flow */
@@ -509,15 +506,15 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
   PktInfo* createPktInfo();
 
   /* make header and packet */
-  void makeHeader(MULTIHOP_HDR_TYPE &header, unsigned char *header_bytes, FlowInfo *flowInfo, unsigned int nextLinkId);
+  void makeHeader(unsigned char *header_bytes, FlowInfo *flowInfo);
 
   /* decoding/demodulating */
-  bool demodulate_packet();
+  bool demodulate_packet(std::string&, FlowInfo*);
 
   /* etc */
   void equalizeSymbols(gr_complex *in, gr_complex *in_estimates);
   void extract_header();
-  void prepareForNewBatch();
+  void prepareForNewBatch(FlowInfo*);
   void debugPktInfo(PktInfo *pktInfo, unsigned char senderId);
   void dewhiten(unsigned char *bytes, const int len);
   void whiten(unsigned char *bytes, const int len);
@@ -532,7 +529,7 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
   /* apurv end */
 
   /* fwder operations */
-  void makePacket(bool sync_send=false); 		
+  void makePacket(std::string, FlowInfo*); 		
   
 
   /* credits */
@@ -557,7 +554,7 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
   void equalize_interpolate_dfe(const gr_complex *in, gr_complex *out);
 
   /* to send the ACK on the backend ethernet */
-  void send_ack(unsigned char flow_id, unsigned char batch_id, bool ack);
+  void send_ack(bool tx_ack, FlowInfo *flowInfo);
   void create_ack_socks();
   vector<unsigned int> d_ack_rx_socks, d_ack_tx_socks;
   bool crc_check(std::string msg, std::string&);
@@ -575,10 +572,7 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
   void calc_outgoing_timestamp(uint64_t &sync_secs, double &sync_frac_of_secs); 
   void print_msg(std::string); 
   int d_expected_size, d_fec_n, d_fec_k;
-  int d_total_batches_received, d_correct_batches;
   int d_crc;			// keeps track of how many pkts decoded correctly in the batch //
-  int d_num_pkts_correct;
-  int d_total_pkts_received;
 
  /* util functions */
  void open_server_sock(int sock_port, vector<unsigned int>& connected_clients, int num_clients);

@@ -69,10 +69,7 @@ digital_ofdm_mapper_bcv::digital_ofdm_mapper_bcv (const std::vector<gr_complex> 
     d_occupied_carriers(occupied_carriers),
     d_fft_length(fft_length),
     d_pending_flag(0),
-    d_batch_q_num(-1),
     d_batch_size(batch_size),
-    d_batch_to_send(0),
-    d_packets_sent_for_batch(0),	// for testing only //
     d_source(source),
     d_modulated(true),	// start afresh //
     d_send_null(false),
@@ -215,6 +212,9 @@ digital_ofdm_mapper_bcv::digital_ofdm_mapper_bcv (const std::vector<gr_complex> 
   populateRouteInfo();
   populateEthernetAddress();
   create_ack_socks();
+
+  create_scheduler_sock();
+  d_request_id = 0;
 }
 
 digital_ofdm_mapper_bcv::~digital_ofdm_mapper_bcv(void)
@@ -300,24 +300,23 @@ int digital_ofdm_mapper_bcv::randsym()
   return (rand() % d_hdr_constellation.size());
 }
 
+/* non-lossy synchronous ACKs/NACKs, since they are sent over the ethernet. 
+Either will receive an ACK or a NACK */
 inline void
-digital_ofdm_mapper_bcv::check_for_ack(unsigned char flowId) {
+digital_ofdm_mapper_bcv::check_for_ack(FlowInfo *fInfo) {
   char ack_buf[ACK_HEADERDATALEN];
   int buf_size = ACK_HEADERDATALEN;
   memset(ack_buf, 0, buf_size);
 
+  unsigned char flowId = fInfo->flowId;
   int n_extracted = 0;
   int rx_sock = d_ack_rx_socks[0];
   printf("check_for_ack, rx_sock: %d\n", rx_sock); fflush(stdout);
   bool found_ack = false;
   int nbytes = recv(rx_sock, ack_buf, buf_size, MSG_PEEK);
   if(nbytes > 0) {
-
-  //while(!found_ack) 
-      int offset = 0;
-      //int nbytes = recv(rx_sock, ack_buf, buf_size, MSG_PEEK);
-      //if(nbytes <= 0) continue;
-      while(1) {
+     int offset = 0;
+     while(1) {
          nbytes = recv(rx_sock, ack_buf+offset, buf_size-offset, 0);
          if(nbytes > 0) offset += nbytes;
          if(offset == buf_size) {
@@ -328,10 +327,10 @@ digital_ofdm_mapper_bcv::check_for_ack(unsigned char flowId) {
 
 	     printf("ACK received - pkt_type: %d, dst: %c\n", ack.pkt_type, ack.dst_id); fflush(stdout);
 	     if(ack.pkt_type == ACK_TYPE && ack.flow_id == flowId && ack.dst_id == d_id) {
-	        if(d_batch_to_send <= ack.batch_number) {
-        	      d_batch_to_send = ack.batch_number + 1;
-	              d_packets_sent_for_batch = 0;
-       		   }
+	        if(fInfo->active_batch <= ack.batch_number) {
+        	   fInfo->active_batch = ack.batch_number + 1;
+	           fInfo->pkts_fwded = 0;
+       		}
 		printf("#################### ACK details, batch: %d, flow: %c ##################################\n",
 						    ack.batch_number, ack.flow_id); fflush(stdout);
 	     }
@@ -350,29 +349,56 @@ digital_ofdm_mapper_bcv::check_for_ack(unsigned char flowId) {
 	    }
             break;
          }
-      }
-      assert(offset == buf_size);
+     }
+     assert(offset == buf_size);
    }
    printf("check_for_ack - flowId: %c, n_extracted: %d\n", flowId, n_extracted); 
 }
 
 int
 digital_ofdm_mapper_bcv::work(int noutput_items,
-	  		      gr_vector_const_void_star &input_items,
-  			      gr_vector_void_star &output_items)
+                              gr_vector_const_void_star &input_items,
+                              gr_vector_void_star &output_items)
 {
-  /* ack over ethernet */
-  struct sockaddr_in client_addr;
-  int addrlen = sizeof(client_addr);
- 
   FlowInfo *flowInfo = getFlowInfo(false, d_flow);
   if(d_modulated && flowInfo->pkts_fwded > 0) {
-     check_for_ack(d_flow);
+     check_for_ack(flowInfo);
   }
- 
-  if(d_batch_q_num != d_batch_to_send)
+
+  if(d_modulated) {
+     send_scheduler_msg(REQUEST_INIT_MSG);
+     while(!check_scheduler_reply()) {
+        sleep(0.5);
+     }
+  }
+
+  if(d_source) 
+     return work_source(noutput_items, input_items, output_items, flowInfo);
+  else
+     return work_forwarder(noutput_items, input_items, output_items, flowInfo);
+}
+
+int
+digital_ofdm_mapper_bcv::work_forwarder(int noutput_items, 
+                                        gr_vector_const_void_star &input_items,
+                                        gr_vector_void_star &output_items, 
+					FlowInfo *flowInfo) 
+{
+  
+
+}
+
+int
+digital_ofdm_mapper_bcv::work_source(int noutput_items,
+	  		      gr_vector_const_void_star &input_items,
+  			      gr_vector_void_star &output_items,
+			      FlowInfo *flowInfo)
+{
+  // if last batch was acked, then dequeue a fresh one //
+  if(flowInfo->last_batch_acked == flowInfo->active_batch)
   {
-	printf("start batch: %d, d_batch_q_num: %d\n", d_batch_to_send, d_batch_q_num); fflush(stdout);
+	flowInfo->active_batch++;
+	printf("start active_batch: %d, last_batch_acked: %d\n", flowInfo->active_batch, flowInfo->last_batch_acked); fflush(stdout);
 	for(unsigned int b = 0; b < d_batch_size; b++)
 	{
 	    d_msg.reset();
@@ -385,12 +411,12 @@ digital_ofdm_mapper_bcv::work(int noutput_items,
 
 	initializeBatchParams();
 	d_pending_flag = 1;				// start of packet flag //
-	d_batch_q_num = d_batch_to_send;
   }
   else if(d_modulated)
   {
-	printf("continue batch: %d, pkts sent: %d\n", d_batch_to_send, d_packets_sent_for_batch); fflush(stdout);
-	// no change in the batch number, but this pkt has been sent out completely (retx) //
+	// retransmission! //
+	assert(flowInfo->last_batch_acked < flowInfo->active_batch);
+	printf("continue batch: %d, pkts_sent: %d\n", flowInfo->active_batch, flowInfo->pkts_fwded); fflush(stdout);
 	initializeBatchParams();
 	d_pending_flag = 1;				// start of packet flag //
   }
@@ -400,7 +426,7 @@ digital_ofdm_mapper_bcv::work(int noutput_items,
   // if start of a packet: then add a header and whiten the entire packet //
   if(d_pending_flag == 1)
   {
-     printf("d_packets_sent_for_batch: %d, d_batch_to_send: %d, d_batch_q_num: %d\n", d_packets_sent_for_batch, d_batch_to_send, d_batch_q_num); fflush(stdout);
+     printf("active_batch: %d, last_batch_acked: %d, pkts_sent: %d\n", flowInfo->active_batch, flowInfo->last_batch_acked, flowInfo->pkts_fwded); fflush(stdout);
 
      fflush(stdout);
      if(((HEADERBYTELEN*8) % d_data_carriers.size()) != 0) {	// assuming bpsk //
@@ -408,7 +434,7 @@ digital_ofdm_mapper_bcv::work(int noutput_items,
 	  assert(false);
      }
 
-     makeHeader();
+     makeHeader(flowInfo->active_batch);
      initHeaderParams();
 
      d_preambles_sent = d_ofdm_symbol_index = d_null_symbol_cnt = d_hdr_ofdm_index = 0; 
@@ -464,11 +490,13 @@ digital_ofdm_mapper_bcv::work(int noutput_items,
   else {
       // send a NULL symbol at the end //
       d_pending_flag = 2;
-      d_packets_sent_for_batch += 1;
+      flowInfo->pkts_fwded++;
       assert(d_ofdm_symbol_index == d_num_ofdm_symbols);
       d_send_null = false;
       d_modulated = true;
       flowInfo->pkts_fwded++;
+      send_scheduler_msg(REQUEST_COMPLETE_MSG);
+      d_request_id++;
   }
 
   // now add the pilot symbols //
@@ -537,31 +565,6 @@ digital_ofdm_mapper_bcv::fill_all_carriers_map() {
   assert(p == d_pilot_carriers.size());
   assert(dc == d_occupied_carriers - d_data_carriers.size() - d_pilot_carriers.size());
 }
-
-/***********************************************************************
- apurv++ starts here, implementing MORE kind of an extension
-
-#### ANALOG domain #####
-send(batch_num, K)
-  var batch_q[K]        #queue containing modulated symbols of K pkts
-  var batch_q_num       #batch num of the batch_queue
-
-  if(batch_q_num != batch_num):
-         flush(batch_q)         #releases the batch queue contents
-         dequeue(msg_q, K)      #dequeues K new packets from digital queue
-         foreach msg dequeued:
-                signal = modulate(msg)  #digital to analog modulation
-                insert(signal, batch_q) #insert analog signal (of symbols)
-                batch_q_num = batch_num #update batch_q number
-
-  encoded_signal = empty        #encoding starts
-  foreach signal in batch_q:
-         choose random coefficient C
-         foreach symbol in signal:
-                symbol' = symbol * C
-
-         encoded_signal = encoded_signal + signal
-*************************************************************************/
 
 inline void
 digital_ofdm_mapper_bcv::initializeBatchParams()
@@ -740,7 +743,7 @@ digital_ofdm_mapper_bcv::generateOFDMSymbolHeader(gr_complex* out)
 	hdr crc
 */
 void
-digital_ofdm_mapper_bcv::makeHeader()
+digital_ofdm_mapper_bcv::makeHeader(unsigned int batchId)
 {
    memset(&d_header, 0, sizeof(d_header));
    d_header.dst_id = d_dst_id;
@@ -750,13 +753,13 @@ digital_ofdm_mapper_bcv::makeHeader()
    d_header.prev_hop_id = d_id;
 
    d_header.packetlen = d_packetlen - 1;		// -1 for '55' appended (ref ofdm_packet_utils)
-   d_header.batch_number = d_batch_to_send;
+   d_header.batch_number = batchId;
    d_header.pkt_type = DATA_TYPE;
 
-   d_header.pkt_num = d_pkt_num;
+   d_header.pkt_num = d_pkt_num;			// unique number across all flows
    d_header.link_id = 0;
  
-   printf("makeHeader for batch: %d, pkt: %d, len: %d\n", d_batch_to_send, d_pkt_num, d_packetlen); fflush(stdout);
+   printf("makeHeader for batch: %d, pkt: %d, len: %d\n", batchId, d_pkt_num, d_packetlen); fflush(stdout);
    d_last_pkt_time = d_out_pkt_time;
 
    for(int i = 0; i < PADDING_SIZE; i++)
@@ -799,24 +802,6 @@ digital_ofdm_mapper_bcv::whiten()
    {
 	d_header_bytes[i] = d_header_bytes[i] ^ random_mask_tuple1[i];
    }
-}
-
-/* ack processing (at the flow-source) */
-void
-digital_ofdm_mapper_bcv::processACK(gr_message_sptr ackMsg) {
-  printf("mapper: processACK\n"); 
-
-  assert(ackMsg->type() == ACK_TYPE);
-  MULTIHOP_ACK_HDR_TYPE ack_header;
-  memcpy(&ack_header, ackMsg->msg(), ACK_HEADERBYTELEN);
-  
-  assert(ack_header.dst_id == d_id);
-  if(d_batch_to_send == ack_header.batch_number) {
-     d_batch_to_send += 1;
-     d_packets_sent_for_batch = 0;
-  }
-
-  ackMsg.reset();
 }
 
 /* ack over ethernet */
@@ -1192,4 +1177,61 @@ digital_ofdm_mapper_bcv::populateFlowInfo() {
    }
 
    fclose (fl);
+}
+
+inline void
+digital_ofdm_mapper_bcv::send_scheduler_msg(int type) {
+   printf("send_scheduler_msg type: %d, request_id: %d\n", type, d_request_id); fflush(stdout);
+   SchedulerMsg request;
+   request.request_id = d_request_id;
+   request.nodeId = d_id;
+   request.type = type;
+
+   int buf_size = sizeof(SchedulerMsg);
+   char *buf = (char*) malloc(buf_size);
+   memcpy(buf, &request, buf_size);
+
+   if(send(d_scheduler_sock, buf, buf_size, 0) < 0) { 
+      printf("errno: %d\n", errno); fflush(stdout);
+      assert(false);
+   }
+
+   free(buf);
+}
+
+inline bool
+digital_ofdm_mapper_bcv::check_scheduler_reply() {
+   int buf_size = sizeof(SchedulerMsg);
+   char *buf = (char*) malloc(buf_size);
+   memset(buf, 0, buf_size);
+
+   SchedulerMsg reply;   
+   reply.request_id = -1;
+
+   int nbytes = recv(d_scheduler_sock, buf, buf_size, MSG_PEEK);
+   if(nbytes > 0) {
+      int offset = 0;
+      while(1) {
+	nbytes = recv(d_scheduler_sock, buf+offset, buf_size-offset, 0);
+	if(nbytes > 0) offset += nbytes;
+	if(offset == buf_size) {
+	   memcpy(&reply, buf, buf_size);
+	   assert(reply.type == REPLY_MSG);
+
+	   printf("check_scheduler_reply, type: %d, request_id: %d, nodeId: %c\n", 
+				reply.type, reply.request_id, reply.nodeId); fflush(stdout);
+	   break;
+	}
+      }
+   }
+   free(buf);
+
+   bool success = (reply.request_id == d_request_id && reply.nodeId == d_id);
+   return success;
+}
+
+inline void
+digital_ofdm_mapper_bcv::create_scheduler_sock() {
+   printf("create_scheduler_sock\n"); fflush(stdout);
+   d_scheduler_sock = open_client_sock(9000, "128.83.120.84", true);
 }

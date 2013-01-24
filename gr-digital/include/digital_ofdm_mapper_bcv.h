@@ -420,13 +420,12 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
   int d_batch_q_num;				// batch num of the current batch_q //
   unsigned int d_batch_size;			// batch size //
   unsigned int d_max_pkts_batch;
-  int d_batch_to_send;				// will only be set at the digital layer, when tx reqd //  
   bool d_modulated;				// set when complete pkt has been modulated (not used) //
   bool d_send_null;				// enable if a null ofdm symbol needs to be sent at the end of a packet //
 
   // header related //
   MULTIHOP_HDR_TYPE d_header;     
-  void makeHeader();
+  void makeHeader(unsigned int);
   void initHeaderParams();
   void generateOFDMSymbolHeader(gr_complex* out);
   unsigned char d_header_bytes[HEADERBYTELEN];
@@ -436,8 +435,6 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
   unsigned int d_hdr_bit_offset;
   unsigned d_hdr_byte_offset;
 
-  unsigned int d_packets_sent_for_batch; 		// for TESTING only!
-    
   unsigned int d_pkt_num;
   unsigned int d_packetlen;
   gr_message_sptr       d_msg;
@@ -478,7 +475,7 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
   int openACKSocket();
   int isACKSocketOpen();
   void create_ack_socks();
-  void check_for_ack(unsigned char);
+  void check_for_ack(FlowInfo*);
   vector<unsigned int> d_ack_rx_socks, d_ack_tx_socks;
 
   void make_time_tag(gr_message_sptr msg);
@@ -518,6 +515,18 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
 
   void populateRouteInfo();
 
+  /* scheduling */
+  void create_scheduler_sock();
+  void send_scheduler_msg(int);
+  bool check_scheduler_reply();
+  unsigned int d_scheduler_sock;
+  int d_request_id;
+
+  /* source/forwarder */
+  int work_forwarder(int noutput_items, gr_vector_const_void_star &input_items,
+                 gr_vector_void_star &output_items, FlowInfo *flowInfo);
+  int work_source(int noutput_items, gr_vector_const_void_star &input_items,
+                 gr_vector_void_star &output_items, FlowInfo *flowInfo);
 };
 
 #endif
