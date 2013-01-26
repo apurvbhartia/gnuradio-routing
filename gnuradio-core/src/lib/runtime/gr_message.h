@@ -68,7 +68,8 @@ typedef struct multihop_hdr_type {
   unsigned char prev_hop_id : 3;
 
   // 2 bytes
-  unsigned short packetlen: 15;
+  unsigned char next_hop_id: 3;
+  unsigned short packetlen: 12;
   unsigned char pkt_type : 1;
 
   // 2 bytes
@@ -116,7 +117,7 @@ typedef struct pkt_str {
 } PktInfo;
 
 typedef struct flow_info_str {
-  NodeId src, dst, prevNodeId, nextNodeId;
+  NodeId src, dst, prevHopId, nextHopId;
   unsigned char flowId;
   unsigned int active_batch;
   int last_batch_acked;
@@ -167,12 +168,13 @@ class gr_message {
   bool 			d_timestamp_valid;		// whether the timestamp is valid
   uint64_t 	d_preamble_sec;				// the preamble sync time in seconds
   double 		d_preamble_frac_sec;	// the preamble sync time's fractional seconds
-  float			d_timing_offset;
 
   unsigned char	 *d_buf_start;	// start of allocated buffer
   unsigned char  *d_msg_start;	// where the msg starts
   unsigned char  *d_msg_end;	// one beyond end of msg
   unsigned char  *d_buf_end;	// one beyond end of allocated buffer
+
+  MULTIHOP_HDR_TYPE d_header;
   
   gr_message (long type, double arg1, double arg2, size_t length);
 
@@ -205,8 +207,8 @@ public:
   long preamble_sec() const { return (long)d_preamble_sec; }
   double preamble_frac_sec() const { return d_preamble_frac_sec; }
 
-  void set_timing_offset(float timing_offset) { d_timing_offset = timing_offset; }
-  float timing_offset() const { return d_timing_offset; }
+  void set_header(MULTIHOP_HDR_TYPE header) { d_header = header; }
+  MULTIHOP_HDR_TYPE header() const { return d_header; }
 
   unsigned char *msg() const { return d_msg_start; }
   size_t length() const      { return d_msg_end - d_msg_start; }

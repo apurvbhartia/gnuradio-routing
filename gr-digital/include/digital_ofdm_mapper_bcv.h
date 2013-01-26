@@ -328,7 +328,8 @@ digital_make_ofdm_mapper_bcv (const std::vector<gr_complex> &hdr_constellation,
 			 const std::vector<gr_complex> &data_constellation,
 			 const std::vector<std::vector<gr_complex> > &preamble,
 			 unsigned msgq_limit, 
-			 unsigned occupied_carriers, unsigned int fft_length, unsigned int id=1,
+			 unsigned occupied_carriers, unsigned int fft_length, 
+			 unsigned int tdma, unsigned int id=1,
 			 unsigned int source_flag=0,
 			 unsigned int batch_size=1,
 		 	 unsigned int dst_id=2);
@@ -348,7 +349,8 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
 			   const std::vector<gr_complex> &data_constellation,
 			   const std::vector<std::vector<gr_complex> > &preamble,
 			   unsigned msgq_limit, 
-			   unsigned occupied_carriers, unsigned int fft_length, unsigned int id,
+			   unsigned occupied_carriers, unsigned int fft_length, 
+			   unsigned int tdma, unsigned int id,
 			   unsigned int source_flag,
 			   unsigned int batch_size, unsigned int dst_id);
  protected:
@@ -356,7 +358,8 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
 			 const std::vector<gr_complex> &data_constellation,
 			 const std::vector<std::vector<gr_complex> > &preamble,
 			 unsigned msgq_limit, 
-		         unsigned occupied_carriers, unsigned int fft_length, unsigned int id,
+		         unsigned occupied_carriers, unsigned int fft_length, 
+			 unsigned int tdma, unsigned int id,
 			 unsigned int source_flag,
 			 unsigned int batch_size, unsigned int dst_id);
 
@@ -425,7 +428,7 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
 
   // header related //
   MULTIHOP_HDR_TYPE d_header;     
-  void makeHeader(unsigned int);
+  void makeHeader(FlowInfo*);
   void initHeaderParams();
   void generateOFDMSymbolHeader(gr_complex* out);
   unsigned char d_header_bytes[HEADERBYTELEN];
@@ -452,7 +455,7 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
   void debugHeader();
   void whiten();
 
-  unsigned char d_id;
+  unsigned char d_id, d_dst_id;
 
   unsigned int d_num_ofdm_symbols;
   unsigned int d_num_hdr_symbols;
@@ -478,14 +481,12 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
   void check_for_ack(FlowInfo*);
   vector<unsigned int> d_ack_rx_socks, d_ack_tx_socks;
 
-  void make_time_tag(gr_message_sptr msg);
   int d_null_symbol_cnt;
 
   uhd::usrp::multi_usrp::sptr d_usrp;
   uhd::time_spec_t d_last_pkt_time, d_out_pkt_time;
-  void make_time_tag_source(); 
+  void make_time_tag(); 
   int d_data_ofdm_index, d_hdr_ofdm_index; 
-  unsigned int d_dst_id;
 
   // util functions //
   int open_client_sock(int port, const char *addr, bool blocking);
@@ -504,8 +505,8 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
 
   /* maps are maintained for helping in socket creation. This will allow to maintain a map
   of unique prevNodes and nextNodes for each node */
-  map<unsigned char, bool> d_prevNodeIds;
-  map<unsigned char, bool> d_nextNodeIds;
+  map<unsigned char, bool> d_prevHopIds;
+  map<unsigned char, bool> d_nextHopIds;
 
 
   unsigned char d_flow;
@@ -516,6 +517,7 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
   void populateRouteInfo();
 
   /* scheduling */
+  int d_tdma;
   void create_scheduler_sock();
   void send_scheduler_msg(int);
   bool check_scheduler_reply();
@@ -523,10 +525,14 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
   int d_request_id;
 
   /* source/forwarder */
-  int work_forwarder(int noutput_items, gr_vector_const_void_star &input_items,
-                 gr_vector_void_star &output_items, FlowInfo *flowInfo);
-  int work_source(int noutput_items, gr_vector_const_void_star &input_items,
-                 gr_vector_void_star &output_items, FlowInfo *flowInfo);
+  bool have_packet_to_send();
+  void make_packet(FlowInfo *flowInfo);
+  int modulate_and_send(int noutput_items,
+   		        gr_vector_const_void_star &input_items,
+  			gr_vector_void_star &output_items,
+			FlowInfo *flowInfo);
+
+  void print_msg(gr_message_sptr);
 };
 
 #endif

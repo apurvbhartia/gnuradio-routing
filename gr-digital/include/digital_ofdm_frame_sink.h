@@ -506,7 +506,7 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
   PktInfo* createPktInfo();
 
   /* make header and packet */
-  void makeHeader(unsigned char *header_bytes, FlowInfo *flowInfo);
+  void makeHeader(MULTIHOP_HDR_TYPE &header, unsigned char *header_bytes, FlowInfo *flowInfo);
 
   /* decoding/demodulating */
   bool demodulate_packet(std::string&, FlowInfo*);
@@ -585,8 +585,8 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
 
  /* maps are maintained for helping in socket creation. This will allow to maintain a map
  of unique prevNodes and nextNodes for each node */ 
- map<unsigned char, bool> d_prevNodeIds;				
- map<unsigned char, bool> d_nextNodeIds;
+ map<unsigned char, bool> d_prevHopIds;				
+ map<unsigned char, bool> d_nextHopIds;
  
 // to record the pkt timestamps 
  uhd::time_spec_t d_last_pkt_time, d_out_pkt_time;

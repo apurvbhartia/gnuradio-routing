@@ -113,7 +113,7 @@ class ofdm_receiver(gr.hier_block2):
 	    #### alternative: chan_filt-> NULL, file_source -> SYNC, file_source -> SIGMIX ####
 	    self.connect(self.chan_filt, gr.null_sink(gr.sizeof_gr_complex))
 	    self.connect(gr.file_source(gr.sizeof_gr_complex, "chan_filt.dat"), ofdm_sync)
-	    self.connect((ofdm_sync, 0), (sigmix, 0))
+	    self.connect(gr.file_source(gr.sizeof_gr_complex, "chan_filt.dat"), gr.delay(gr.sizeof_gr_complex, (fft_length)), (sigmix, 0))
 	else:
 	    # chan_filt->NULL #
 	    self.connect(self.chan_filt, gr.null_sink(gr.sizeof_gr_complex))

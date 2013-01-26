@@ -341,7 +341,7 @@ public:
         uint64_t c_sync_secs = (uint64_t) c_time.get_full_secs();
         double c_sync_frac_of_secs = c_time.get_frac_secs();
 
-	printf("uhd_usrp_sink(tx) :: num_sent:::::::: %d, ninput_items: %d, sob: %d, eob: %d, o_sync_sec: %llu, o_sync_frac: %f, sync_sec: %llu, sync_frac: %f, c_sync_sec: %llu, c_sync_frac: %f\n", num_sent, ninput_items, _metadata.start_of_burst, _metadata.end_of_burst, o_sync_secs, o_sync_frac_of_secs, sync_secs, sync_frac_of_secs, c_sync_secs, c_sync_frac_of_secs); fflush(stdout);
+	printf("uhd_usrp_sink(tx) :: num_sent:: %d, ninput_items: %d, sob: %d, eob: %d, o_sync_sec: %llu, o_sync_frac: %f, sync_sec: %llu, sync_frac: %f, c_sync_sec: %llu, c_sync_frac: %f\n", num_sent, ninput_items, _metadata.start_of_burst, _metadata.end_of_burst, o_sync_secs, o_sync_frac_of_secs, sync_secs, sync_frac_of_secs, c_sync_secs, c_sync_frac_of_secs); fflush(stdout);
         return num_sent;
     }
 
@@ -357,12 +357,12 @@ public:
 	const uint64_t tag0_count = tag0.offset;
 	const uint64_t samp0_count = this->nitems_read(0);
 
-	printf("uhd_usrp_sink(tx) :: tag_work called, num_tags: %d, nitems_read: %ld, offset: %ld\n", _tags.size(), samp0_count, tag0_count); fflush(stdout);
+	//printf("uhd_usrp_sink(tx) :: tag_work called, num_tags: %d, nitems_read: %ld, offset: %ld\n", _tags.size(), samp0_count, tag0_count); fflush(stdout);
 	//only transmit nsamples from 0 to the first tag
 	//this ensures that the next work starts on a tag
 	if (samp0_count != tag0_count){
 	    ninput_items = tag0_count - samp0_count;
-	    printf("uhd_usrp_sink(tx) :: ninput_items: %ld\n", ninput_items); fflush(stdout);
+	    //printf("uhd_usrp_sink(tx) :: ninput_items: %ld\n", ninput_items); fflush(stdout);
 	    return;
 	}
 
@@ -379,14 +379,14 @@ public:
 	    //from zero until the next tag or end of work
 	    if (my_tag_count != tag0_count){
 		ninput_items = my_tag_count - samp0_count;
-		printf("uhd_usrp_sink(tx) :: my_tag_count: %ld, ninput_items: %ld\n", my_tag_count, ninput_items); fflush(stdout);
+		//printf("uhd_usrp_sink(tx) :: my_tag_count: %ld, ninput_items: %ld\n", my_tag_count, ninput_items); fflush(stdout);
 		break;
 	    }
 
 	    //handle end of burst with a mini end of burst packet
 	    else if (pmt::pmt_equal(key, EOB_KEY)){
 		    _metadata.end_of_burst = pmt::pmt_to_bool(value);
-		    printf("uhd_usrp_sink(tx) :: EOB_KEY\n"); fflush(stdout);
+		    //printf("uhd_usrp_sink(tx) :: EOB_KEY\n"); fflush(stdout);
 		    ninput_items = 1;
 		    return;
 	    }
@@ -394,7 +394,7 @@ public:
 	    //set the start of burst flag in the metadata
 	    else if (pmt::pmt_equal(key, SOB_KEY)){
 		    _metadata.start_of_burst = pmt::pmt_to_bool(value);
-		    printf("uhd_usrp_sink(tx) :: SOB_KEY, offset: %llu\n", my_tag_count); fflush(stdout); 
+		    //printf("uhd_usrp_sink(tx) :: SOB_KEY, offset: %llu\n", my_tag_count); fflush(stdout); 
 	    }
 
 	    //set the time specification in the metadata

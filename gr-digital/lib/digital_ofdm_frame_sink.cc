@@ -778,6 +778,10 @@ digital_ofdm_frame_sink::header_ok()
 	printf("\nrx_crc: %u, calc_crc: %u, \t\t\t\t\tpkt_num: %d \tbatch_num: %d\n", rx_crc, calc_crc, d_header.pkt_num, d_header.batch_number); fflush(stdout);
   }
 
+  char prev_hop = ((int) d_header.prev_hop_id) + '0';
+  char next_hop = ((int) d_header.next_hop_id) + '0';
+  printf("prevHop: %c, nextHop: %c\n", prev_hop, next_hop); fflush(stdout);
+ 
   /* DEBUG
   printf("\nrx_crc: %u, calc_crc: %u, \t\t\t\t\tpkt_num: %d \tbatch_num: %d\n", rx_crc, calc_crc, d_header.pkt_num, d_header.batch_number); fflush(stdout);
   printf("hdr details: (src: %d), (rx: %d), (batch_num: %d), (d_nsenders: %d), (d_packetlen: %d), (d_pkt_type: %d)\n", d_header.src_id, d_header.dst_id, d_header.batch_number, d_header.nsenders, d_header.packetlen, d_header.pkt_type);
@@ -882,7 +886,20 @@ digital_ofdm_frame_sink::open_hestimates_log()
 */
 bool
 digital_ofdm_frame_sink::shouldProcess(FlowInfo *fInfo) {
-  d_dst = true;
+
+  char hdr_next_hop = ((int) d_header.next_hop_id) + '0';
+  char hdr_flow = ((int) d_header.flow_id) + '0';
+  char hdr_dst = ((int) d_header.dst_id) + '0'; 
+
+  printf("shouldProcess - hdr_next_hop: %c, hdr_dst: %c, d_id: %c, hdr_flow: %c, flow: %c\n",
+			hdr_next_hop, hdr_dst, d_id, hdr_flow, fInfo->flowId); fflush(stdout);
+  if(hdr_next_hop == d_id && hdr_flow == fInfo->flowId) {
+     if(hdr_dst == d_id) 
+        d_dst = true;
+     else
+	d_fwd = true;
+  }
+  else return false;
 
   if(fInfo->last_batch_acked == -1)
      return true;
@@ -943,6 +960,7 @@ digital_ofdm_frame_sink::getFlowInfo(bool create, unsigned char flowId)
      memset(flow_info, 0, sizeof(FlowInfo));
      flow_info->pkts_fwded = 0;
      flow_info->last_batch_acked = -1;
+     flow_info->flowId = flowId;
      d_flowInfoVector.push_back(flow_info);
   }
 
@@ -951,24 +969,29 @@ digital_ofdm_frame_sink::getFlowInfo(bool create, unsigned char flowId)
 
 /* handle the 'lead sender' case */
 void
-digital_ofdm_frame_sink::makeHeader(unsigned char *header_bytes, FlowInfo *flowInfo)
+digital_ofdm_frame_sink::makeHeader(MULTIHOP_HDR_TYPE &header, unsigned char *header_bytes, FlowInfo *flowInfo)
 {
-   MULTIHOP_HDR_TYPE header;
-   printf("batch#: %d, makeHeader for pkt: %d, len: %d\n", flowInfo->active_batch, d_pkt_num, d_packetlen); fflush(stdout);
+   memset(header_bytes, 0, HEADERBYTELEN);
+
+   memset(&header, 0, sizeof(header));
+
+   header.flow_id = flowInfo->flowId;
    header.src_id = flowInfo->src; 
    header.dst_id = flowInfo->dst;       
    header.prev_hop_id = d_id;	
-   header.batch_number = flowInfo->active_batch;
+   header.next_hop_id = flowInfo->nextHopId;
+
+   assert(header.next_hop_id != UNASSIGNED);
+
+   printf("-- makeHeader b: %d, pkt_num: %d, len: %d\n", flowInfo->active_batch, d_pkt_num, d_packetlen); fflush(stdout);
 
    header.packetlen = d_packetlen;
+   header.batch_number = flowInfo->active_batch;
    header.pkt_type = DATA_TYPE;
    header.pkt_num = d_pkt_num;
    header.link_id = 0;				// dumb field - might use later
 
    flowInfo->pkts_fwded++;
-
-   for(int i = 0; i < PADDING_SIZE; i++)
-        header.pad[i] = 0;
 
    unsigned char header_data_bytes[HEADERDATALEN];
    memcpy(header_data_bytes, &header, HEADERDATALEN);                         // copy e'thing but the crc
@@ -977,16 +1000,14 @@ digital_ofdm_frame_sink::makeHeader(unsigned char *header_bytes, FlowInfo *flowI
    header.hdr_crc = calc_crc;
 
    memcpy(header_bytes, header_data_bytes, HEADERDATALEN);                            // copy header data
-   memcpy(header_bytes+HEADERDATALEN, &calc_crc, sizeof(int));                // copy header crc
+   memcpy(header_bytes+HEADERDATALEN, &calc_crc, sizeof(int));                	      // copy header crc
 
-   memcpy(header_bytes+HEADERDATALEN+sizeof(int), header.pad, PADDING_SIZE);
    printf("len: %d, crc: %u\n", d_packetlen, calc_crc);
 
    whiten(header_bytes, HEADERBYTELEN);
-   //debugHeader(header_bytes);
+   debugHeader(header_bytes);
 }
 
-#if 0
 void
 digital_ofdm_frame_sink::debugHeader(unsigned char *header_bytes)
 {
@@ -1001,6 +1022,7 @@ digital_ofdm_frame_sink::debugHeader(unsigned char *header_bytes)
    whiten(header_bytes, HEADERBYTELEN);
 }
 
+#if 0
 inline CreditInfo*
 digital_ofdm_frame_sink::findCreditInfo(unsigned char flowId) {
   CreditInfo *creditInfo = NULL;
@@ -1027,7 +1049,7 @@ digital_ofdm_frame_sink::send_ack(bool ack, FlowInfo *flowInfo) {
   memset(&ack_header, 0, sizeof(ack_header));
  
   ack_header.src_id = d_id;
-  ack_header.dst_id = flowInfo->prevNodeId;
+  ack_header.dst_id = flowInfo->prevHopId;
 
   ack_header.batch_number = flowInfo->active_batch;                     // active-batch got ACKed
   if(ack) ack_header.pkt_type = ACK_TYPE;
@@ -1050,17 +1072,60 @@ digital_ofdm_frame_sink::send_ack(bool ack, FlowInfo *flowInfo) {
   printf("@@@@@@@@@@@@@@@@ sent ACK (%d bytes) for batch %d @@@@@@@@@@@@@@@@@@@@\n", ACK_HEADERDATALEN, flowInfo->active_batch); fflush(stdout);
 }
 
+#if 0
 void
 digital_ofdm_frame_sink::makePacket(std::string msg, FlowInfo *flowInfo) {
-  gr_message_sptr out_msg = gr_make_message(DATA_TYPE, 0, 0, d_packetlen);
+  printf("makePacket start\n"); fflush(stdout);
+  gr_message_sptr out_msg = gr_make_message(DATA_TYPE, 0, 0, HEADERBYTELEN+d_packetlen);
   unsigned char header_bytes[HEADERBYTELEN];
+  makeHeader(header_bytes, flowInfo);		// header is whitened in this function 
 
-  makeHeader(header_bytes, flowInfo);
+  unsigned char *data_bytes = (unsigned char*) malloc(d_packetlen);
+  memcpy(data_bytes, (unsigned char*) msg.data(), d_packetlen);
+
+  whiten(data_bytes, d_packetlen);		// whitening effect!
+  printf("whitened.. \n"); fflush(stdout);
+  for(int i = 0; i < d_packetlen; i++) {
+     printf("%02x", (unsigned char) data_bytes[i]);
+  }
+  printf("\n"); fflush(stdout);
+
   memcpy(out_msg->msg(), header_bytes, HEADERBYTELEN);
-  memcpy(out_msg->msg()+HEADERBYTELEN, (unsigned char*) msg.data(), d_packetlen);	// data contains the crc 
-
+  memcpy(out_msg->msg()+HEADERBYTELEN, data_bytes, d_packetlen);  
   d_out_queue->insert_tail(out_msg);
+
   out_msg.reset();
+  free(data_bytes);
+  printf("makePacket end\n"); fflush(stdout);
+}
+#endif
+
+void
+digital_ofdm_frame_sink::makePacket(std::string msg, FlowInfo *flowInfo) {
+  printf("makePacket start\n"); fflush(stdout);
+  gr_message_sptr out_msg = gr_make_message(DATA_TYPE, 0, 0, HEADERBYTELEN+d_packetlen);
+  unsigned char header_bytes[HEADERBYTELEN];
+  MULTIHOP_HDR_TYPE header;
+  makeHeader(header, header_bytes, flowInfo);           // header is whitened in this function 
+  out_msg->set_header(header);
+
+
+  unsigned char *data_bytes = (unsigned char*) malloc(d_packetlen);
+  memcpy(data_bytes, (unsigned char*) msg.data(), d_packetlen);
+
+  whiten(data_bytes, d_packetlen);              // whitening effect!
+  printf("whitened.. \n"); fflush(stdout);
+  for(int i = 0; i < d_packetlen; i++) {
+     printf("%02x", (unsigned char) data_bytes[i]);
+  }
+  printf("\n"); fflush(stdout);
+
+  memcpy(out_msg->msg(), data_bytes, d_packetlen);  
+  d_out_queue->insert_tail(out_msg);
+
+  out_msg.reset();
+  free(data_bytes);
+  printf("makePacket end\n"); fflush(stdout);
 }
 
 void
@@ -1344,8 +1409,9 @@ digital_ofdm_frame_sink::open_client_sock(int port, const char *addr, bool block
 */
 inline void
 digital_ofdm_frame_sink::create_ack_socks() {
+  printf("(sink):: create_ack_socks\n"); fflush(stdout);
   // clients to which I will send an ACK // 
-  int num_clients = d_prevNodeIds.size();
+  int num_clients = d_prevHopIds.size();
   EthInfoMap::iterator e_it = d_ethInfoMap.find(d_id);
   assert(e_it != d_ethInfoMap.end());
   EthInfo *ethInfo = (EthInfo*) e_it->second;
@@ -1365,6 +1431,7 @@ digital_ofdm_frame_sink::create_ack_socks() {
   }
   assert(d_ack_rx_socks.size() == d_nextNodeIds.size());
 #endif
+  printf("(sink):: create_ack_socks done\n"); fflush(stdout);
 }
 
 /* read shortest path info */
@@ -1398,27 +1465,27 @@ digital_ofdm_frame_sink::populateRouteInfo() {
 	FlowInfo *flowInfo = getFlowInfo(false, flowId);
 
 	NodeId src = atoi(token_vec[2]) + '0';
-	NodeId dst = atoi(token_vec[num_nodes-1]) + '0';
+	NodeId dst = atoi(token_vec[token_vec.size()-1]) + '0';
 	assert(flowInfo->src == src && flowInfo->dst == dst); 			// sanity
 
         for(int i = 0; i < num_nodes; i++) {
            NodeId nodeId = atoi(token_vec[i+2]) + '0';
 	   if(nodeId == d_id) {
 	      if(i == 0) {
-		 flowInfo->nextNodeId = atoi(token_vec[i+3]) + '0';		// next entry
-		 flowInfo->prevNodeId = UNASSIGNED;				// unassigned
-		 d_nextNodeIds.insert(std::pair<unsigned char, bool> (flowInfo->nextNodeId, true));
+		 flowInfo->nextHopId = atoi(token_vec[i+3]) + '0';		// next entry
+		 flowInfo->prevHopId = UNASSIGNED;				// unassigned
+		 d_nextHopIds.insert(std::pair<unsigned char, bool> (flowInfo->nextHopId, true));
 	      }
 	      else if(i == num_nodes-1) {
-		 flowInfo->nextNodeId = UNASSIGNED;					// unassigned
-		 flowInfo->prevNodeId = atoi(token_vec[i+1]) + '0';		// previous entry
-		 d_prevNodeIds.insert(std::pair<unsigned char, bool> (flowInfo->prevNodeId, true));
+		 flowInfo->nextHopId = UNASSIGNED;					// unassigned
+		 flowInfo->prevHopId = atoi(token_vec[i+1]) + '0';		// previous entry
+		 d_prevHopIds.insert(std::pair<unsigned char, bool> (flowInfo->prevHopId, true));
 	      }
 	      else {
-		 flowInfo->nextNodeId = atoi(token_vec[i+3]) + '0';             // next entry
-		 flowInfo->prevNodeId = atoi(token_vec[i+1]) + '0';             // previous entry
-		 d_nextNodeIds.insert(std::pair<unsigned char, bool> (flowInfo->nextNodeId, true));
-		 d_prevNodeIds.insert(std::pair<unsigned char, bool> (flowInfo->prevNodeId, true));
+		 flowInfo->nextHopId = atoi(token_vec[i+3]) + '0';             // next entry
+		 flowInfo->prevHopId = atoi(token_vec[i+1]) + '0';             // previous entry
+		 d_nextHopIds.insert(std::pair<unsigned char, bool> (flowInfo->nextHopId, true));
+		 d_prevHopIds.insert(std::pair<unsigned char, bool> (flowInfo->prevHopId, true));
 	      }
 	      break;
 	   }

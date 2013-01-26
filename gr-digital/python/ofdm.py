@@ -125,8 +125,9 @@ class ofdm_mod(gr.hier_block2):
         self._pkt_input = digital_swig.ofdm_mapper_bcv(hdr_rotated_const, data_rotated_const, 
 					     padded_preambles,msgq_limit,
                                              options.occupied_tones, options.fft_length,
+					     options.tdma,
                                              options.id, options.src,
-                                             options.batch_size, 
+                                             options.batch_size,
 					     options.dst_id)	
 
         self.ifft = gr.fft_vcc(self._fft_length, False, win, True)
@@ -228,6 +229,8 @@ class ofdm_mod(gr.hier_block2):
                           help="the destination id [default=%default]")
 	expert.add_option("", "--hop", type="intx", default=0,
                           help="hop number (for preamble) [default=%default]")
+	expert.add_option("", "--tdma", type="intx", default=1,
+                          help="external TDMA scheduler [default=%default]")
 	# apurv++ end #
 
     # Make a static method to call before instantiation
