@@ -374,98 +374,7 @@ digital_ofdm_frame_sink::digital_ofdm_frame_sink(const std::vector<gr_complex> &
     d_preamble(preamble),
     d_preamble_cnt(0)
 {
-  std::string carriers = "F00F";                //8-DC subcarriers      // apurv++
-
-  // A bit hacky to fill out carriers to occupied_carriers length
-  int diff = (d_occupied_carriers - 4*carriers.length());
-  while(diff > 7) {
-    carriers.insert(0, "f");
-    carriers.insert(carriers.length(), "f");
-    diff -= 8;
-  }
-
-  // if there's extras left to be processed
-  // divide remaining to put on either side of current map
-  // all of this is done to stick with the concept of a carrier map string that
-  // can be later passed by the user, even though it'd be cleaner to just do this
-  // on the carrier map itself
-  int diff_left=0;
-  int diff_right=0;
-
-  // dictionary to convert from integers to ascii hex representation
-  char abc[16] = {'0', '1', '2', '3', '4', '5', '6', '7',
-                  '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
-  if(diff > 0) {
-    char c[2] = {0,0};
-
-    diff_left = (int)ceil((float)diff/2.0f);  // number of carriers to put on the left side
-    c[0] = abc[(1 << diff_left) - 1];         // convert to bits and move to ASCI integer
-    carriers.insert(0, c);
-
-    diff_right = diff - diff_left;            // number of carriers to put on the right side
-    c[0] = abc[0xF^((1 << diff_right) - 1)];  // convert to bits and move to ASCI integer
-    carriers.insert(carriers.length(), c);
-  }
-
-  /* pilot configuration */
-  int num_pilots = 8; //4;
-  unsigned int pilot_index = 0;                      // tracks the # of pilots carriers added   
-  unsigned int data_index = 0;                       // tracks the # of data carriers added
-  unsigned int count = 0;                            // tracks the total # of carriers added
-  unsigned int pilot_gap = 11; //18;
-  unsigned int start_offset = 0; //8;
-
-  // It seemed like such a good idea at the time...
-  // because we are only dealing with the occupied_carriers
-  // at this point, the diff_left in the following compensates
-  // for any offset from the 0th carrier introduced
-  unsigned int i,j,k;
-  for(i = 0; i < (d_occupied_carriers/4)+diff_left; i++) {
-    char c = carriers[i];
-    for(j = 0; j < 4; j++) {
-      k = (strtol(&c, NULL, 16) >> (3-j)) & 0x1;
-      if(k) {
-
-	int carrier_index = 4*i + j - diff_left;
-        // check if it should be pilot, else add as data //
-        if(count == (start_offset + (pilot_index * pilot_gap))) {               // check notes below !
-           d_pilot_carriers.push_back(carrier_index);
-           pilot_index++;
-        }
-        else {
-           d_data_carriers.push_back(carrier_index);  // use this subcarrier
-           data_index++;
-        }
-        count++;
-      }
-    }
-  }
-
-  assert(pilot_index + data_index == count);
-
-  /* debug carriers */
-  printf("pilot carriers: \n");
-  for(int i = 0; i < d_pilot_carriers.size(); i++) {
-     printf("%d ", d_pilot_carriers[i]); fflush(stdout);
-  }
-  printf("\n");
-  assert(d_pilot_carriers.size() == pilot_index);
-
-  printf("data carriers: \n");
-  for(int i = 0; i < d_data_carriers.size(); i++) {
-     printf("%d ", d_data_carriers[i]); fflush(stdout);
-  }
-  printf("\n");
-  assert(d_data_carriers.size() == data_index);
-
-  // hack the above to populate the d_pilots_carriers map and remove the corresponding entries from d_data_carriers //
-  /* if # of data carriers = 72
-        # of pilots        = 4
-        gap b/w pilots     = 72/4 = 18
-        start pilot        = 8
-        other pilots       = 8, , 26, .. so on
-        P.S: DC tones should not be pilots!
-  */
+   assign_subcarriers();
    d_dfe.resize(d_pilot_carriers.size());
    fill(d_dfe.begin(), d_dfe.end(), gr_complex(1.0,0.0));
 
@@ -526,6 +435,45 @@ digital_ofdm_frame_sink::digital_ofdm_frame_sink(const std::vector<gr_complex> &
   populateFlowInfo();
   populateRouteInfo();
   create_ack_socks();
+}
+
+void
+digital_ofdm_frame_sink::assign_subcarriers() {
+  int dc_tones = 8;
+  int num_pilots = 8;
+  int pilot_gap = 11;
+
+  int half1_end = (d_occupied_carriers-dc_tones)/2;	//40
+  int half2_start = half1_end+dc_tones;			//48
+
+  // first half
+  for(int i = 0; i < half1_end; i++) {
+     if(i%pilot_gap == 0) 
+	d_pilot_carriers.push_back(i);
+     else
+	d_data_carriers.push_back(i);
+  }
+
+  // second half
+  for(int i = half2_start, j = 0; i < d_occupied_carriers; i++, j++) {
+     if(j%pilot_gap == 0) 
+	d_pilot_carriers.push_back(i);
+     else
+	d_data_carriers.push_back(i);
+  }
+
+  /* debug carriers */
+  printf("pilot carriers: \n");
+  for(int i = 0; i < d_pilot_carriers.size(); i++) {
+     printf("%d ", d_pilot_carriers[i]); fflush(stdout);
+  }
+  printf("\n");
+
+  printf("data carriers: \n");
+  for(int i = 0; i < d_data_carriers.size(); i++) {
+     printf("%d ", d_data_carriers[i]); fflush(stdout);
+  }
+  printf("\n");
 }
 
 void

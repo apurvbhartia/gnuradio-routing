@@ -550,6 +550,7 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
   void fillAckRouteMap();
 
   /* pilots */
+  void assign_subcarriers();
   void fill_all_carriers_map();
   void equalize_interpolate_dfe(const gr_complex *in, gr_complex *out);
 

@@ -97,103 +97,7 @@ digital_ofdm_mapper_bcv::digital_ofdm_mapper_bcv (const std::vector<gr_complex> 
   d_out_pkt_time = uhd::time_spec_t(0.0);
   d_last_pkt_time = uhd::time_spec_t(0.0);
 
-  // this is not the final form of this solution since we still use the occupied_tones concept,
-  // which would get us into trouble if the number of carriers we seek is greater than the occupied carriers.
-  // Eventually, we will get rid of the occupied_carriers concept.
-  std::string carriers = "F00F";		// apurv++,  8 DC subcarriers
- 
-  // A bit hacky to fill out carriers to occupied_carriers length
-  int diff = (d_occupied_carriers - 4*carriers.length()); 
-  while(diff > 7) {
-    carriers.insert(0, "f");
-    carriers.insert(carriers.length(), "f");
-    diff -= 8;
-  }
-
-  // if there's extras left to be processed
-  // divide remaining to put on either side of current map
-  // all of this is done to stick with the concept of a carrier map string that
-  // can be later passed by the user, even though it'd be cleaner to just do this
-  // on the carrier map itself
-  int diff_left=0;
-  int diff_right=0;
-
-  // dictionary to convert from integers to ascii hex representation
-  char abc[16] = {'0', '1', '2', '3', '4', '5', '6', '7', 
-		  '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
-  if(diff > 0) {
-    char c[2] = {0,0};
-
-    diff_left = (int)ceil((float)diff/2.0f);   // number of carriers to put on the left side
-    c[0] = abc[(1 << diff_left) - 1];          // convert to bits and move to ASCI integer
-    carriers.insert(0, c);
-    
-    diff_right = diff - diff_left;	       // number of carriers to put on the right side
-    c[0] = abc[0xF^((1 << diff_right) - 1)];   // convert to bits and move to ASCI integer
-        carriers.insert(carriers.length(), c);
-  }
-  
-  // find out how many zeros to pad on the sides; the difference between the fft length and the subcarrier
-  // mapping size in chunks of four. This is the number to pack on the left and this number plus any 
-  // residual nulls (if odd) will be packed on the right. 
-  diff = (d_fft_length/4 - carriers.length())/2; 
-
-  /* pilot configuration */ 
-  int num_pilots = 8; //12; //4;
-  unsigned int pilot_index = 0;			     // tracks the # of pilots carriers added   
-  unsigned int data_index = 0;			     // tracks the # of data carriers added
-  unsigned int count = 0;			     // tracks the total # of carriers added
-  unsigned int pilot_gap = 11; //7; //18;
-  unsigned int start_offset = 0; //8;
-
-  unsigned int i,j,k;
-  //for(i = 0; i < (d_occupied_carriers/4)+diff_left; i++) {
-  for(i = 0; i < carriers.length(); i++) {
-    char c = carriers[i];                            // get the current hex character from the string
-    for(j = 0; j < 4; j++) {                         // walk through all four bits
-      k = (strtol(&c, NULL, 16) >> (3-j)) & 0x1;     // convert to int and extract next bit
-      if(k) {                                        // if bit is a 1, 
-	int carrier_index = 4*(i+diff) + j - diff_left;
-
-	// check if it should be pilot, else add as data //
-	if(count == (start_offset + (pilot_index * pilot_gap))) {		// check notes below !
-	   d_pilot_carriers.push_back(carrier_index);
-	   pilot_index++;
-	}
-	else {
-   	   d_data_carriers.push_back(carrier_index);  // use this subcarrier
-	   data_index++;
-	}
-	count++;
-      }
-    }
-  }
-
-  assert(pilot_index + data_index == count);
-
-  /* debug carriers */ 
-  printf("pilot carriers (%d): \n", d_pilot_carriers.size()); 
-  for(int i = 0; i < d_pilot_carriers.size(); i++) {
-     printf("%d ", d_pilot_carriers[i]); fflush(stdout);
-  }
-  printf("\n");
-  assert(d_pilot_carriers.size() == pilot_index);
-  assert(d_data_carriers.size() == data_index); 
-  
-  // hack the above to populate the d_pilots_carriers map and remove the corresponding entries from d_data_carriers //
-  /* if # of data carriers = 72
-	# of pilots        = 6
-	gap b/w pilots     = 72/6 = 12
- 	start pilot	   = 5
-	other pilots	   = 5, 17, 29, .. so on
-	P.S: DC tones should not be pilots!
-  */  
-  printf("data carriers (%d): \n", d_data_carriers.size());
-  for(int i = 0; i < d_data_carriers.size(); i++) {
-     printf("%d ", d_data_carriers[i]); fflush(stdout);
-  }
-  printf("\n");
-
+  assign_subcarriers();
   // make sure we stay in the limit currently imposed by the occupied_carriers
   if(d_data_carriers.size() > d_occupied_carriers) {
     throw std::invalid_argument("digital_ofdm_mapper_bcv: subcarriers allocated exceeds size of occupied carriers");
@@ -548,6 +452,46 @@ digital_ofdm_mapper_bcv::modulate_and_send(int noutput_items,
   return 1;
 }
 
+void
+digital_ofdm_mapper_bcv::assign_subcarriers() {
+  int dc_tones = 8;
+  int num_pilots = 8;
+  int pilot_gap = 11;
+
+  int half1_end = (d_occupied_carriers-dc_tones)/2;     //40
+  int half2_start = half1_end+dc_tones;                 //48
+
+  int off = (d_fft_length-d_occupied_carriers)/2;	//4
+  
+  // first half
+  for(int i = 0; i < half1_end; i++) {
+     if(i%pilot_gap == 0)
+        d_pilot_carriers.push_back(i+off);
+     else
+        d_data_carriers.push_back(i+off);
+  }
+
+  // second half
+  for(int i = half2_start, j = 0; i < d_occupied_carriers; i++, j++) {
+     if(j%pilot_gap == 0)
+        d_pilot_carriers.push_back(i+off);
+     else
+        d_data_carriers.push_back(i+off);
+  }
+
+  /* debug carriers */
+  printf("pilot carriers: \n");
+  for(int i = 0; i < d_pilot_carriers.size(); i++) {
+     printf("%d ", d_pilot_carriers[i]); fflush(stdout);
+  }
+  printf("\n");
+
+  printf("data carriers: \n");
+  for(int i = 0; i < d_data_carriers.size(); i++) {
+     printf("%d ", d_data_carriers[i]); fflush(stdout);
+  }
+  printf("\n");
+}
 
 void
 digital_ofdm_mapper_bcv::fill_all_carriers_map() {

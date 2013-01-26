@@ -468,6 +468,7 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
 
   void logGeneratedTxSymbols(gr_complex *out);
 
+  void assign_subcarriers();
   void fill_all_carriers_map();
 
   // ack over ethernet //
