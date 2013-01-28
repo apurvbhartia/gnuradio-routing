@@ -28,7 +28,7 @@ digital_make_ofdm_mapper_bcv (const std::vector<gr_complex> &hdr_constellation,
                          unsigned int msgq_limit,
                          unsigned int bits_per_symbol,
                          unsigned int fft_length,
-                         unsigned int tdma,
+                         unsigned int tdma, unsigned int proto,
                          unsigned int id=1,
                          unsigned int source_flag=0,
                          unsigned int batch_size=1,
@@ -44,7 +44,7 @@ class digital_ofdm_mapper_bcv : public gr_sync_block
                       unsigned int msgq_limit,
                       unsigned int bits_per_symbol,
                       unsigned int fft_length,
-                      unsigned int tdma,
+                      unsigned int tdma, unsigned int proto,
                       unsigned int id,
                       unsigned int source_flag,
                       unsigned int batch_size,
@@ -57,6 +57,4 @@ class digital_ofdm_mapper_bcv : public gr_sync_block
   int work(int noutput_items,
            gr_vector_const_void_star &input_items,
            gr_vector_void_star &output_items);
-
-  int isACKSocketOpen();
 };

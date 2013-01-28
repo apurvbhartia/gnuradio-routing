@@ -125,7 +125,7 @@ class ofdm_mod(gr.hier_block2):
         self._pkt_input = digital_swig.ofdm_mapper_bcv(hdr_rotated_const, data_rotated_const, 
 					     padded_preambles,msgq_limit,
                                              options.occupied_tones, options.fft_length,
-					     options.tdma,
+					     options.tdma, options.proto,
                                              options.id, options.src,
                                              options.batch_size,
 					     options.dst_id)	
@@ -182,16 +182,11 @@ class ofdm_mod(gr.hier_block2):
             msg = gr.message(1) # tell self._pkt_input we're not sending any more packets
         elif (type == 0):
 	    ############# print "original_payload =", string_to_hex_list(payload)
-	    pkt = ofdm_packet_utils.make_packet(payload, 1, self._bits_per_symbol, self._fec_n, self._fec_k, self._pad_for_usrp, whitening=True)
-            
-            #print "pkt =", string_to_hex_list(pkt)
-            msg = gr.message_from_string(pkt)
+	    #pkt = ofdm_packet_utils.make_packet(payload, 1, self._bits_per_symbol, self._fec_n, self._fec_k, self._pad_for_usrp, whitening=True)
+            msg = gr.message_from_string(payload)
 	
 	if type == 0:
-       	    if self._ack == 1:
-	       	while self._pkt_input.isACKSocketOpen() == 0:
-		      continue
-            self._pkt_input.msgq().insert_tail(msg)				# for source! 	(msg needs to be modulated in mapper)
+            self._pkt_input.msgq().insert_tail(msg)			# for source! 	(msg needs to be modulated in mapper)
 	else:
    	    self._pkt_input.msgq().insert_tail(payload)			# for forwarder! (payload is already modulated)
 
@@ -231,6 +226,8 @@ class ofdm_mod(gr.hier_block2):
                           help="hop number (for preamble) [default=%default]")
 	expert.add_option("", "--tdma", type="intx", default=1,
                           help="external TDMA scheduler [default=%default]")
+        expert.add_option("", "--proto", type="intx", default=0,
+                          help="SPP:0, PRO: 1 [default=%default]")
 	# apurv++ end #
 
     # Make a static method to call before instantiation
@@ -353,7 +350,7 @@ class ofdm_demod(gr.hier_block2):
 					     data_rotated_const, range(data_arity),
 					     preambles,
                                              self._rcvd_pktq, self._out_pktq,
-                                             self._occupied_tones, self._fft_length,
+                                             self._occupied_tones, self._fft_length, options.proto,
                                              phgain, frgain, self._id,
                                              self._batch_size, 
                                              self._size, self._fec_n, self._fec_k)
@@ -415,6 +412,8 @@ class ofdm_demod(gr.hier_block2):
                           help="cross correlation threshold [default=%default]")
         expert.add_option("", "--rx-manual", type="intx", default=0,
                           help="refer ofdm.py (demod) param [default=%default]")
+        expert.add_option("", "--proto", type="intx", default=0,
+                          help="SPP:0, PRO: 1 [default=%default]")
 
 	# used in ofdm_receiver.py #
         expert.add_option("", "--use-default", type="intx", default=1,

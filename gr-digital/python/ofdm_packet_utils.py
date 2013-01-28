@@ -130,21 +130,6 @@ def make_packet(payload, samples_per_symbol, bps, fec_n, fec_k, pad_for_usrp=Tru
     if L > MAXLEN:
         raise ValueError, "len(payload) must be in [0, %d]" % (MAXLEN,)
 
-    """ apurv--: take out the header, we have our own multihop hdr now (ref rainier sink) 
-    pkt_hd = make_header(L, whitener_offset)
-    pkt_dt = ''.join((enc_payload_with_crc, '\x55'))
-    packet_length = len(pkt_hd) + len(pkt_dt)
-
-    if pad_for_usrp:
-        usrp_packing = _npadding_bytes(packet_length, samples_per_symbol, bits_per_symbol) * '\x55'
-        pkt_dt = pkt_dt + usrp_packing
-
-    if(whitening):
-        pkt = pkt_hd + whiten(pkt_dt, whitener_offset)
-    else:
-        pkt = pkt_hd + pkt_dt
-    """
-
     ### apurv++: replace above code by this one ###
     pkt_dt = ''.join((enc_payload_with_crc, '\x55'))
 

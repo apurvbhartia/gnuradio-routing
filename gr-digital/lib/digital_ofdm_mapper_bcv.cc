@@ -38,18 +38,22 @@
 #include <arpa/inet.h>
 #include <stdlib.h>
 
+#include "GaloisField.h"
+#include "NetCoder.h"
+
 digital_ofdm_mapper_bcv_sptr
 digital_make_ofdm_mapper_bcv (const std::vector<gr_complex> &hdr_constellation, 
 			 const std::vector<gr_complex> &data_constellation,
 			 const std::vector<std::vector<gr_complex> > &preamble,
 			 unsigned int msgq_limit, 
                          unsigned int occupied_carriers, unsigned int fft_length, 
-			 unsigned int tdma, unsigned int id,
+			 unsigned int tdma, unsigned int proto,
+			 unsigned int id,
 			 unsigned int source,
 			 unsigned int batch_size,
 			 unsigned int dst_id)
 {
-  return gnuradio::get_initial_sptr(new digital_ofdm_mapper_bcv (hdr_constellation, data_constellation, preamble, msgq_limit, occupied_carriers, fft_length, tdma, id, source, batch_size, dst_id));
+  return gnuradio::get_initial_sptr(new digital_ofdm_mapper_bcv (hdr_constellation, data_constellation, preamble, msgq_limit, occupied_carriers, fft_length, tdma, proto, id, source, batch_size, dst_id));
 }
 
 // Consumes 1 packet and produces as many OFDM symbols of fft_length to hold the full packet
@@ -58,7 +62,8 @@ digital_ofdm_mapper_bcv::digital_ofdm_mapper_bcv (const std::vector<gr_complex> 
 					const std::vector<std::vector<gr_complex> > &preamble,
 					unsigned int msgq_limit, 
 					unsigned int occupied_carriers, unsigned int fft_length, 
-					unsigned int tdma, unsigned int id,
+					unsigned int tdma, unsigned int proto,
+					unsigned int id,
 					unsigned int source,
 					unsigned int batch_size,
 					unsigned int dst_id) 
@@ -81,7 +86,8 @@ digital_ofdm_mapper_bcv::digital_ofdm_mapper_bcv (const std::vector<gr_complex> 
     d_preambles_sent(0),
     d_preamble(preamble),
     d_flow(0),
-    d_tdma(tdma)
+    d_tdma(tdma),
+    d_proto(proto)
 {
   if (!(d_occupied_carriers <= d_fft_length))
     throw std::invalid_argument("digital_ofdm_mapper_bcv: occupied carriers must be <= fft_length");
@@ -118,7 +124,13 @@ digital_ofdm_mapper_bcv::digital_ofdm_mapper_bcv (const std::vector<gr_complex> 
   populateFlowInfo();
   populateRouteInfo();
   populateEthernetAddress();
-  create_ack_socks();
+
+  if(d_proto == SPP) {
+     create_ack_socks();
+  } 
+  else if(d_proto == PRO) {
+     create_e2e_ack_socks();
+  }
 
   if(d_tdma) {
     create_scheduler_sock();
@@ -219,7 +231,11 @@ digital_ofdm_mapper_bcv::check_for_ack(FlowInfo *fInfo) {
 
   unsigned char flowId = fInfo->flowId;
   int n_extracted = 0;
-  int rx_sock = d_ack_rx_socks[0];
+
+  map<FlowId, SockId>::iterator mit = d_sock_map.find(flowId);
+  assert(mit != d_sock_map.end());
+  SockId rx_sock = mit->second;
+
   printf("check_for_ack, rx_sock: %d\n", rx_sock); fflush(stdout);
   bool found_ack = false;
   int nbytes = recv(rx_sock, ack_buf, buf_size, MSG_PEEK);
@@ -266,6 +282,7 @@ digital_ofdm_mapper_bcv::check_for_ack(FlowInfo *fInfo) {
      }
      assert(offset == buf_size);
    }
+
    printf("check_for_ack - flowId: %c, n_extracted: %d\n", flowId, n_extracted); 
 }
 
@@ -306,7 +323,10 @@ digital_ofdm_mapper_bcv::work(int noutput_items,
 	sleep(0.5);
      }*/
 
-     make_packet(flowInfo);				// blocking if no msg to send //
+     if(d_proto == SPP)
+        make_packet_SPP(flowInfo);				// blocking if no msg to send //
+     else
+	make_packet_PRO(flowInfo);
      print_msg(d_msg);
      if(d_tdma) {
         send_scheduler_msg(REQUEST_INIT_MSG);
@@ -321,23 +341,24 @@ digital_ofdm_mapper_bcv::work(int noutput_items,
 }
 
 void
-digital_ofdm_mapper_bcv::make_packet(FlowInfo *flowInfo)
+digital_ofdm_mapper_bcv::make_packet_SPP(FlowInfo *flowInfo)
 {
   assert(d_modulated);
   // if last batch was acked, then dequeue a fresh one //
   if(flowInfo->last_batch_acked == flowInfo->active_batch) {
      flowInfo->active_batch++;
      printf("start active_batch: %d, last_batch_acked: %d\n", flowInfo->active_batch, flowInfo->last_batch_acked); fflush(stdout);
-     for(unsigned int b = 0; b < d_batch_size; b++) {
-	 d_msg.reset();
-	 d_msg = d_msgq->delete_head();		// dequeue the pkts from the queue //
-	 assert(d_msg->length() > 0);	
-	 d_packetlen = d_msg->length();		// assume: all pkts in batch are of same length //
-	 d_num_ofdm_symbols = ceil(((float) ((d_packetlen) * 8))/(d_data_carriers.size() * d_data_nbits)); // include 'x55'
-	 printf("d_num_ofdm_symbols: %d, d_num_hdr_symbols: %d\n", d_num_ofdm_symbols, d_num_hdr_symbols); fflush(stdout);
+     d_msg.reset();
+     gr_message_sptr msg = d_msgq->delete_head();         // dequeue the pkts from the queue //
+     assert(msg->length() > 0);
 
-	 makeHeader(flowInfo);
-     }
+     add_crc_and_fec(msg, 0, 0);	     // creates the final d_msg
+     msg.reset();
+
+     d_packetlen = d_msg->length();         // assume: all pkts in batch are of same length //
+     d_num_ofdm_symbols = ceil(((float) ((d_packetlen) * 8))/(d_data_carriers.size() * d_data_nbits)); // include 'x55'
+     printf("d_num_ofdm_symbols: %d, d_num_hdr_symbols: %d\n", d_num_ofdm_symbols, d_num_hdr_symbols); fflush(stdout);
+     makeHeader(flowInfo);
   }
   else {
      // retransmission! //
@@ -358,6 +379,56 @@ digital_ofdm_mapper_bcv::make_packet(FlowInfo *flowInfo)
   initHeaderParams();
 
   d_preambles_sent = d_ofdm_symbol_index = d_null_symbol_cnt = d_hdr_ofdm_index = 0; 
+  d_pkt_num++;
+}
+
+inline void
+digital_ofdm_mapper_bcv::make_packet_PRO(FlowInfo *flowInfo)
+{
+  assert(d_modulated);
+  // if last batch was acked, then dequeue a fresh one //
+
+  gr_message_sptr msg[MAX_BATCH_SIZE];
+  int msg_len = 0;
+  if(flowInfo->last_batch_acked == flowInfo->active_batch) {
+     flowInfo->active_batch++;
+     printf("start active_batch: %d, last_batch_acked: %d\n", flowInfo->active_batch, flowInfo->last_batch_acked); fflush(stdout);
+     d_msg.reset();
+     for(unsigned int b = 0; b < d_batch_size; b++) {
+	 msg[b] = d_msgq->delete_head();
+	 assert(msg[b]->length() > 0);
+	 msg_len = msg[b]->length();
+     }
+
+     encodePacket_PRO(msg, flowInfo, msg_len, true);			// free 'msg' in this call 
+     d_packetlen = d_msg->length();
+
+     d_num_ofdm_symbols = ceil(((float) ((d_packetlen) * 8))/(d_data_carriers.size() * d_data_nbits));
+     printf("d_num_ofdm_symbols: %d, d_num_hdr_symbols: %d\n", d_num_ofdm_symbols, d_num_hdr_symbols); fflush(stdout);
+     makeHeader(flowInfo);
+  }
+  else {
+     // retransmission! //
+     assert(flowInfo->last_batch_acked < flowInfo->active_batch);
+     printf("retransmit batch: %d, last_batch_acked: %d, pkts_sent: %d\n",
+                flowInfo->active_batch, flowInfo->last_batch_acked, flowInfo->pkts_fwded); fflush(stdout);
+
+     encodePacket_PRO(msg, flowInfo, 0, false);
+     makeHeader(flowInfo);
+  }
+
+  d_modulated = false;
+  initializeBatchParams();
+  d_pending_flag = 1;                             // start of packet flag //
+
+  if(((HEADERBYTELEN*8) % d_data_carriers.size()) != 0) {       // assuming bpsk //
+     printf("HEADERBYTELEN: %d, size: %d\n", HEADERBYTELEN, d_data_carriers.size()); fflush(stdout);
+     assert(false);
+  }
+
+  initHeaderParams();
+
+  d_preambles_sent = d_ofdm_symbol_index = d_null_symbol_cnt = d_hdr_ofdm_index = 0;
   d_pkt_num++;
 }
 
@@ -720,11 +791,14 @@ digital_ofdm_mapper_bcv::makeHeader(FlowInfo *fInfo)
       d_header.prev_hop_id = d_id;
       d_header.next_hop_id = fInfo->nextHopId;
 
-      d_header.packetlen = d_packetlen - 1;		// -1 for '55' appended (ref ofdm_packet_utils)
+      d_header.packetlen = d_packetlen;		// -1 for '55' appended (ref ofdm_packet_utils)
       d_header.batch_number = fInfo->active_batch;
       d_header.pkt_type = DATA_TYPE;
       d_header.pkt_num = d_pkt_num;			// unique number across all flows
       d_header.link_id = 0;
+
+      if(d_proto) 
+	memcpy(d_header.coeffs, fInfo->coeffs, MAX_BATCH_SIZE);
    }
    else {
       d_header = d_msg->header();
@@ -747,79 +821,69 @@ digital_ofdm_mapper_bcv::makeHeader(FlowInfo *fInfo)
    printf("len: %d, crc: %u\n", d_packetlen, calc_crc);
 
    //debugHeader();  
-   whiten();
+   whiten(d_header_bytes, HEADERBYTELEN);
    //debugHeader();
 }
 
 void
 digital_ofdm_mapper_bcv::debugHeader()
 {
-   whiten();	// dewhitening effect !
+   whiten(d_header_bytes, HEADERBYTELEN);	// dewhitening effect !
    memset(&d_header, 0, HEADERBYTELEN);
    assert(HEADERBYTELEN == (HEADERDATALEN + sizeof(int) + PADDING_SIZE));
    memcpy(&d_header, d_header_bytes, HEADERBYTELEN);
 
    printf("debug crc: %u\n", d_header.hdr_crc); 
    printf("\n"); 
-   whiten();
+   whiten(d_header_bytes, HEADERBYTELEN);
 }
 
 void
-digital_ofdm_mapper_bcv::whiten()
+digital_ofdm_mapper_bcv::whiten(unsigned char *bytes, unsigned int len)
 {
-   for(int i = 0; i < HEADERBYTELEN; i++)
-   {
-	d_header_bytes[i] = d_header_bytes[i] ^ random_mask_tuple1[i];
+   for(int i = 0; i < len; i++)
+	bytes[i] = bytes[i] ^ random_mask_tuple1[i];
+}
+
+/* uses 'msg' to create a 'd_msg' with appropriate length. 'msg' can be freed after 
+   this call */
+void
+digital_ofdm_mapper_bcv::add_crc_and_fec(gr_message_sptr msg, int fec_N, int fec_K) {
+   printf("add_crc_and_fec, fec_N: %d, fec_K: %d\n", fec_N, fec_K); fflush(stdout);
+   unsigned int calc_crc = 0;
+   int len = msg->length();
+   printf("len: %d\n", len); fflush(stdout); 
+
+   unsigned char *msg_data = (unsigned char*) malloc(len+sizeof(calc_crc));
+   memset(msg_data, 0, len+sizeof(calc_crc));
+   memcpy(msg_data, msg->msg(), len);
+
+   for(int i = 0; i < len; i++) {
+     printf("%02x", (unsigned char) msg_data[i]);
    }
-}
+   printf("\n");
 
-/* ack over ethernet */
-int
-digital_ofdm_mapper_bcv::openACKSocket() {
-  int sock_port = 9000;
-  int sockfd;
-  struct sockaddr_in dest;
 
-  /* create socket */
-  sockfd = socket(PF_INET, SOCK_STREAM, 0);
-  fcntl(sockfd, F_SETFL, O_NONBLOCK);
- 
-  /* ensure the socket address can be reused, even after CTRL-C the application */ 
-  int optval = 1;
-  int ret = setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+   calc_crc = digital_crc32(msg_data, len); 
+   memcpy(msg_data+len, &calc_crc, sizeof(calc_crc));
+   len += sizeof(calc_crc);
 
-  if(ret == -1) {
-	printf("@ digital_ofdm_mapper_bcv::setsockopt ERROR\n"); fflush(stdout);
-  }
+   for(int i = 0; i < len; i++) {
+     printf("%02x", (unsigned char) msg_data[i]);
+   }
+   printf("\n");
 
-  /* initialize structure dest */
-  bzero(&dest, sizeof(dest));
-  dest.sin_family = AF_INET;
+   whiten(msg_data, len);
 
-  /* assign a port number to socket */
-  dest.sin_port = htons(sock_port);
-  dest.sin_addr.s_addr = INADDR_ANY;
+   if(fec_N == 0 && fec_K == 0) {
+      d_msg = gr_make_message(0, 0, 0, len);
+      memcpy(d_msg->msg(), msg_data, len);
+      return;
+   }
 
-  bind(sockfd, (struct sockaddr*)&dest, sizeof(dest));
+   free(msg_data);
 
-  /* make it listen to socket with max 20 connections */
-  listen(sockfd, 20);
-  if(sockfd != -1) {
-    printf("ACK Socket OPEN success\n"); fflush(stdout);
-  }
-  else {
-    printf("ACK Socket OPEN error\n"); fflush(stdout);
-  }
-
-  return sockfd;
-}
-
-int
-digital_ofdm_mapper_bcv::isACKSocketOpen() {
-  if(!d_sock_opened) 
-    return 0;
-
-  return 1;
+   // TODO: add fec digital_tx_wrapper
 }
 
 /* in the work_source() mode to just test if trigger on ethernet works */
@@ -924,9 +988,9 @@ digital_ofdm_mapper_bcv::open_server_sock(int sock_port, vector<unsigned int>& c
   assert(connected_clients.size() == num_clients);
 }
 
-inline int
+inline SockId
 digital_ofdm_mapper_bcv::open_client_sock(int port, const char *addr, bool blocking) {
-  int sockfd;
+  SockId sockfd;
   struct sockaddr_in dest;
 
   struct timeval tv;
@@ -990,44 +1054,27 @@ digital_ofdm_mapper_bcv::populateEthernetAddress()
     fclose (fl);
 }
 
-/* d_ack_tx_socks (clients to which I will send an ACK)
-   d_ack_rx_socks (servers from which I will receive an ACK)
-   all clients/servers must be unique 
-*/
+/* all clients/servers must be unique */
 inline void
 digital_ofdm_mapper_bcv::create_ack_socks() {
   printf("(mapper):: create_ack_socks\n"); fflush(stdout);
   EthInfoMap::iterator e_it;
   EthInfo *ethInfo = NULL;
-#if 0
-  // clients to which I will send an ACK // 
-  int num_clients = d_prevHopIds.size();
-  EthInfoMap::iterator e_it = d_ethInfoMap.find(d_id);
-  assert(e_it != d_ethInfoMap.end());
-  EthInfo *ethInfo = (EthInfo*) e_it->second;
-  open_server_sock(ethInfo->port, d_ack_tx_socks, num_clients);
-#endif
 
-  // connect to servers from which I will receive an ACK //
-  map<unsigned char, bool>:: iterator it = d_nextHopIds.begin();
-
-  //struct timeval tv;
-  //tv.tv_sec = 1;
-  //tv.tv_usec = 5e5;
-
-  while(it != d_nextHopIds.end()) {
-     NodeId nodeId = it->first;
-     e_it = d_ethInfoMap.find(nodeId); 
-     assert(e_it != d_ethInfoMap.end());
-     ethInfo = (EthInfo*) e_it->second;
-     int rx_sock = open_client_sock(ethInfo->port, ethInfo->addr, true);
-
-     //assert(setsockopt(rx_sock, SOL_SOCKET, SO_RCVTIMEO, (char *)&tv,sizeof(struct timeval))==0);
-     d_ack_rx_socks.push_back(rx_sock);
-     it++;
+  FlowInfoVector::iterator f_it = d_flowInfoVector.begin();
+  while(f_it != d_flowInfoVector.end()) {
+      FlowInfo *fInfo = *f_it;
+      if(fInfo->nextHopId != UNASSIGNED) {
+	 e_it = d_ethInfoMap.find(fInfo->nextHopId);
+	 assert(e_it != d_ethInfoMap.end());
+	 ethInfo = (EthInfo*) e_it->second;
+	 SockId rx_sock = open_client_sock(ethInfo->port, ethInfo->addr, true);
+	 d_sock_map.insert(std::pair<FlowId, unsigned int>(fInfo->flowId, rx_sock));
+      }
+      f_it++;
   }
-  assert(d_ack_rx_socks.size() == d_nextHopIds.size());
-  printf("(mapper): create_ack_socks num_socks: %d done!\n", d_ack_rx_socks.size()); fflush(stdout);
+  
+  printf("(mapper): create_ack_socks num_socks: %d done!\n", d_sock_map.size()); fflush(stdout);
 }
 
 /* read shortest path info */
@@ -1208,4 +1255,99 @@ inline void
 digital_ofdm_mapper_bcv::create_scheduler_sock() {
    printf("(mapper): create_scheduler_sock\n"); fflush(stdout);
    d_scheduler_sock = open_client_sock(9000, "128.83.120.84", true);
+}
+
+/* encode all the packets in the fInfo->pkts and generate a new encode pkt */
+inline void
+digital_ofdm_mapper_bcv::encodePacket_PRO(gr_message_sptr *msg, FlowInfo *fInfo, int data_len, bool new_batch) {
+   printf("encodePacket_PRO - new_batch: %d\n", new_batch); fflush(stdout);
+   NetCoder *encoder = getNetCoder(fInfo->flowId, data_len);
+   if(!new_batch)
+     data_len = encoder->data_len;
+
+   /* add the packets to the encoder */
+   unsigned char *pkt = (unsigned char*) malloc(d_batch_size+data_len);
+   if(new_batch) {
+      encoder->num_pkts = 0;
+      for(int i = 0; i < d_batch_size; i++) {
+         for(int j = 0; j < d_batch_size; j++) {
+	    if(i == j) pkt[j] = 1;
+	    else pkt[j] = 0;
+         }
+
+         memcpy(pkt+d_batch_size, msg[i]->msg(), data_len);
+
+	 printf("original content - [%d]\n", i); fflush(stdout);
+	 for(int k = 0; k < data_len+d_batch_size; k++)
+            printf("%02X ", pkt[k]);
+         printf("\n");
+
+         encoder->AddPacket(pkt);
+         msg[i].reset();					 // done with this //
+      }
+   }
+
+   /* generate an encoded pkt */
+   pkt = encoder->Encode();
+   printf("encoded content - \n"); fflush(stdout);
+   for(int i = 0; i < d_batch_size+data_len; i++) 
+       printf("%02X ", pkt[i]);
+   printf("\n");
+ 
+   /* copy the coeffs */
+   for(int i = 0; i < d_batch_size; i++) {
+      fInfo->coeffs[i] = pkt[i] & 0xff;
+      printf("coeff[%d]: %d\n", i, fInfo->coeffs[i]); fflush(stdout);
+   }
+
+   /* add crc and fec */
+   gr_message_sptr e_msg = gr_make_message(0, 0, 0, data_len);
+   memcpy(e_msg->msg(), &(pkt[d_batch_size]), data_len);
+   add_crc_and_fec(e_msg, 0, 0);
+
+   print_msg(d_msg);
+
+   /* clean up */
+   e_msg.reset();
+   free(pkt);
+}
+
+inline NetCoder*
+digital_ofdm_mapper_bcv::getNetCoder(FlowId flowId, int data_len) {
+   FlowNetCoderMap::iterator it = d_NetCoderMap.find(flowId);
+
+   if(data_len == 0) 
+     assert(it != d_NetCoderMap.end());
+ 
+   NetCoder *netcoder = NULL;
+   if(it == d_NetCoderMap.end()) {
+      netcoder = new NetCoder(d_batch_size, data_len);
+      d_NetCoderMap.insert(std::pair<FlowId, NetCoder*> (flowId, netcoder));
+   }
+   else
+      netcoder = it->second;
+
+   return netcoder;
+}
+
+/* for PRO */
+inline void
+digital_ofdm_mapper_bcv::create_e2e_ack_socks() {
+  printf("(mapper):: create_e2e_ack_socks\n"); fflush(stdout);
+  EthInfoMap::iterator e_it;
+  EthInfo *ethInfo = NULL;
+
+  FlowInfoVector::iterator it = d_flowInfoVector.begin();
+  while(it != d_flowInfoVector.end()) {
+      FlowInfo *fInfo = *it;
+      if(fInfo->src == d_id) {
+	 e_it = d_ethInfoMap.find(fInfo->dst);
+	 assert(e_it != d_ethInfoMap.end());
+	 ethInfo = (EthInfo*) e_it->second;
+	 SockId rx_sock = open_client_sock(ethInfo->port, ethInfo->addr, true);
+	 d_sock_map.insert(std::pair<FlowId, unsigned int>(fInfo->flowId, rx_sock));
+      }
+      it++;
+  } 
+  printf("(mapper): create_e2e_ack_socks num_socks: %d done!\n", d_sock_map.size()); fflush(stdout);
 }

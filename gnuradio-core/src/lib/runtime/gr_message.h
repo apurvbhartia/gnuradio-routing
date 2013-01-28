@@ -33,22 +33,24 @@
 
 /* apurv++ define header type */
 #define MAX_BATCH_SIZE     2 
-#define PADDING_SIZE       6
+#define PADDING_SIZE       4
 #define UNASSIGNED 100
-
 #define ACK_PADDING_SIZE 6
-#define SRC_PILOT 0 				// enable if only the source pilots are relayed throughout //
 
+/* packet types */
 #define DATA_TYPE       1 //0
 #define ACK_TYPE        2 //1
 #define NACK_TYPE    3
 
+/* scheduler msgs */
 #define REQUEST_INIT_MSG 1
 #define REPLY_MSG 2
 #define REQUEST_COMPLETE_MSG 3
 
-#define MAX_RX 3
-//#define H_PRECODING 1
+/* protocols */
+#define SPP 0
+#define PRO 1
+
 
 typedef struct coeff_str {
   unsigned short phase;				// scaled
@@ -77,11 +79,14 @@ typedef struct multihop_hdr_type {
 
   // 1
   unsigned char link_id;
+
+  // 2 bytes
+  unsigned char coeffs[MAX_BATCH_SIZE];		   // only used for PRO; empty (0) when not used
    
   // 4
   unsigned int hdr_crc;
 
-  // 6
+  // 4
   unsigned char pad[PADDING_SIZE];                 // to ensure size % (occupied_carriers-dc_carriers) = 0
 
 } MULTIHOP_HDR_TYPE;
@@ -102,6 +107,9 @@ typedef struct ack_multihop_hdr_type {
 } MULTIHOP_ACK_HDR_TYPE;
 
 typedef unsigned char NodeId;
+typedef unsigned char FlowId;
+typedef int SockId;
+
 typedef std::vector<unsigned char> NodeIds;
 
 typedef struct eth_info {
@@ -125,6 +133,10 @@ typedef struct flow_info_str {
 
   unsigned int total_pkts_rcvd;
   unsigned int num_pkts_correct;
+ 
+  /* for pro */
+  unsigned char coeffs[MAX_BATCH_SIZE];		// only holds the coeffs for the current packet (working copy) - others are held in NetCoder pkt_lst //
+  
 } FlowInfo;
 
 typedef std::vector<FlowInfo*> FlowInfoVector;

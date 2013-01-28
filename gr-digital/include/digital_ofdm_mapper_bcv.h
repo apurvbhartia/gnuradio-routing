@@ -38,6 +38,8 @@
 
 #include <uhd/usrp/multi_usrp.hpp>
 
+#include "NetCoder.h"
+
 #ifdef HAVE_IO_H
 #include <io.h>
 #endif
@@ -56,9 +58,9 @@
 #endif
 // apurv for logging ends //
 
-//#define TESTING        0
-
 using namespace std;
+
+typedef map<FlowId, NetCoder*> FlowNetCoderMap;
 
 // whitening random tuple (from ofdm_packet_utils.py) //
 unsigned char random_mask_tuple1[] = {
@@ -329,7 +331,8 @@ digital_make_ofdm_mapper_bcv (const std::vector<gr_complex> &hdr_constellation,
 			 const std::vector<std::vector<gr_complex> > &preamble,
 			 unsigned msgq_limit, 
 			 unsigned occupied_carriers, unsigned int fft_length, 
-			 unsigned int tdma, unsigned int id=1,
+			 unsigned int tdma, unsigned int proto,
+			 unsigned int id=1,
 			 unsigned int source_flag=0,
 			 unsigned int batch_size=1,
 		 	 unsigned int dst_id=2);
@@ -350,7 +353,8 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
 			   const std::vector<std::vector<gr_complex> > &preamble,
 			   unsigned msgq_limit, 
 			   unsigned occupied_carriers, unsigned int fft_length, 
-			   unsigned int tdma, unsigned int id,
+			   unsigned int tdma, unsigned int proto,
+			   unsigned int id,
 			   unsigned int source_flag,
 			   unsigned int batch_size, unsigned int dst_id);
  protected:
@@ -359,7 +363,8 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
 			 const std::vector<std::vector<gr_complex> > &preamble,
 			 unsigned msgq_limit, 
 		         unsigned occupied_carriers, unsigned int fft_length, 
-			 unsigned int tdma, unsigned int id,
+			 unsigned int tdma, unsigned int proto,
+			 unsigned int id,
 			 unsigned int source_flag,
 			 unsigned int batch_size, unsigned int dst_id);
 
@@ -384,6 +389,7 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
   unsigned int 		d_occupied_carriers;
   unsigned int 		d_fft_length;
   int			d_pending_flag;
+  int			d_proto;
 
   std::vector<int> d_data_carriers;
   std::vector<int> d_pilot_carriers;
@@ -453,16 +459,13 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
   void flushBatchQ();
 
   void debugHeader();
-  void whiten();
+  void whiten(unsigned char*, unsigned int);
 
   unsigned char d_id, d_dst_id;
 
   unsigned int d_num_ofdm_symbols;
   unsigned int d_num_hdr_symbols;
   unsigned int d_ofdm_symbol_index;
-
-  // ack //
-  void processACK(gr_message_sptr ackMsg);
 
   uint64_t d_time_pkt_sent;
 
@@ -471,16 +474,11 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
   void assign_subcarriers();
   void fill_all_carriers_map();
 
-  // ack over ethernet //
-  bool d_sock_opened;
-  int d_sock_fd, d_client_fd;
-  char *d_ack_buf;
-
-  int openACKSocket();
-  int isACKSocketOpen();
+  // acks //
   void create_ack_socks();
+  void create_e2e_ack_socks();
   void check_for_ack(FlowInfo*);
-  vector<unsigned int> d_ack_rx_socks, d_ack_tx_socks;
+  map<FlowId, SockId> d_sock_map;
 
   int d_null_symbol_cnt;
 
@@ -490,7 +488,7 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
   int d_data_ofdm_index, d_hdr_ofdm_index; 
 
   // util functions //
-  int open_client_sock(int port, const char *addr, bool blocking);
+  SockId open_client_sock(int port, const char *addr, bool blocking);
   void open_server_sock(int, vector<unsigned int>&, int);
 
   void get_nextHop_rx(NodeIds &rx_ids);
@@ -522,16 +520,23 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
   void create_scheduler_sock();
   void send_scheduler_msg(int);
   bool check_scheduler_reply();
-  unsigned int d_scheduler_sock;
+  SockId d_scheduler_sock;
   int d_request_id;
 
   /* source/forwarder */
   bool have_packet_to_send();
-  void make_packet(FlowInfo *flowInfo);
+  void make_packet_SPP(FlowInfo *flowInfo);
+  void make_packet_PRO(FlowInfo *flowInfo);
+  void encodePacket_PRO(gr_message_sptr *sptr, FlowInfo *fInfo, int len, bool new_batch);
   int modulate_and_send(int noutput_items,
    		        gr_vector_const_void_star &input_items,
   			gr_vector_void_star &output_items,
 			FlowInfo *flowInfo);
+
+  /* encoding/decoding */
+  void add_crc_and_fec(gr_message_sptr, int, int);
+  FlowNetCoderMap d_NetCoderMap;
+  NetCoder* getNetCoder(FlowId, int);
 
   void print_msg(gr_message_sptr);
 };

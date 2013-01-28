@@ -39,6 +39,7 @@
 #include <deque>
 
 #include <uhd/usrp/multi_usrp.hpp>
+#include "NetCoder.h"
 
 #define USE_PILOT 0
 #ifdef HAVE_IO_H
@@ -77,6 +78,7 @@ digital_make_ofdm_frame_sink (const std::vector<gr_complex> &hdr_sym_position,
 			 const std::vector<std::vector<gr_complex> > &preamble,
 			 gr_msg_queue_sptr target_queue, gr_msg_queue_sptr fwd_queue, 
 			 unsigned int occupied_tones, unsigned int fft_length,
+			 unsigned int proto,
 			 float phase_gain=0.25, float freq_gain=0.25*0.25/4.0, unsigned int id=1, 
 			 unsigned int batch_size=1,  
 			 int exp_size=400, int fec_n=0, int fec_k=0);
@@ -84,9 +86,12 @@ digital_make_ofdm_frame_sink (const std::vector<gr_complex> &hdr_sym_position,
 /* credits */
 typedef struct credit_str {
   unsigned char flowId;
-  float credit;
+  NodeId prevHopId, nextHopId;
+  float credit_val, delta_credit;
 } CreditInfo;
 typedef vector<CreditInfo*> CreditInfoVector;
+
+typedef map<FlowId, NetCoder*> FlowNetCoderMap;
 
 unsigned char random_mask_tuple[] = {
   255,  63,   0,  16,   0,  12,   0,   5, 192,   3,  16,   1, 204,   0,  85, 192,
@@ -366,7 +371,7 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
                            const std::vector<unsigned char> &data_sym_value_out,
 			   const std::vector<std::vector<gr_complex> > &preamble,
 			   gr_msg_queue_sptr target_queue, gr_msg_queue_sptr fwd_queue, 
-			   unsigned int occupied_tones, unsigned int fft_length,
+			   unsigned int occupied_tones, unsigned int fft_length, unsigned int proto,
 			   float phase_gain, float freq_gain, unsigned int id, 
 			   unsigned int batch_size,
 			   int exp_size, int fec_n, int fec_k);
@@ -390,6 +395,7 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
   int 		     d_packetlen;		// length of packet
   int                d_packet_whitener_offset;  // offset into whitener string to use
   int		     d_packetlen_cnt;		// how many so far
+  int		     d_proto;
 
   gr_complex * d_derotated_output;  // Pointer to output stream to send deroated symbols out
 
@@ -426,6 +432,7 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
 		     const std::vector<std::vector<gr_complex> > &preamble,
 		     gr_msg_queue_sptr target_queue, gr_msg_queue_sptr fwd_queue, 
 		     unsigned int occupied_tones, unsigned int fft_length,
+		     unsigned int proto,
 		     float phase_gain, float freq_gain, unsigned int id, 
 		     unsigned int batch_size,  
 		     int exp_size, int fec_n, int fec_k);
@@ -533,7 +540,8 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
   
 
   /* credits */
-  unsigned int num_data_fwd;
+  CreditInfoVector d_creditInfoVector;
+  void populateCreditInfo();
   void updateCredit();
 
   /* ACKs */
@@ -556,8 +564,11 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
 
   /* to send the ACK on the backend ethernet */
   void send_ack(bool tx_ack, FlowInfo *flowInfo);
-  void create_ack_socks();
-  vector<unsigned int> d_ack_rx_socks, d_ack_tx_socks;
+  void create_per_hop_ack_socks();
+  void create_e2e_ack_socks();
+
+  vector<unsigned int> d_ack_tx_socks;
+  map<unsigned char, unsigned int> d_sock_map;
   bool crc_check(std::string msg, std::string&);
 
   int d_hdr_ofdm_index;
@@ -596,5 +607,10 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
  void calculate_snr(gr_complex*);
  const std::vector<std::vector<gr_complex> >   d_preamble; 
  int d_preamble_cnt;
+
+ // encoder/decoder //
+ FlowNetCoderMap d_NetCoderMap;
+ NetCoder* getNetCoder(FlowId, int);
+ bool decodePacket(std::string encoded_msg, FlowInfo *fInfo);
 };
 #endif /* INCLUDED_GR_OFDM_FRAME_SINK_H */
