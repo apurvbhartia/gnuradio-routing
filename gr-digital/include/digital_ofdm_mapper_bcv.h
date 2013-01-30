@@ -524,10 +524,15 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
   int d_request_id;
 
   /* source/forwarder */
-  bool have_packet_to_send();
   void make_packet_SPP(FlowInfo *flowInfo);
-  void make_packet_PRO(FlowInfo *flowInfo);
-  void encodePacket_PRO(gr_message_sptr *sptr, FlowInfo *fInfo, int len, bool new_batch);
+
+  void make_packet_PRO_source(FlowInfo *flowInfo);
+  void source_PRO(FlowInfo *flowInfo);
+
+  int work_forwarder_PRO(int noutput_items,
+                         gr_vector_const_void_star &input_items,
+                         gr_vector_void_star &output_items);
+  void make_packet_PRO_fwd();
   int modulate_and_send(int noutput_items,
    		        gr_vector_const_void_star &input_items,
   			gr_vector_void_star &output_items,
@@ -537,8 +542,22 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
   void add_crc_and_fec(gr_message_sptr, int, int);
   FlowNetCoderMap d_NetCoderMap;
   NetCoder* getNetCoder(FlowId, int);
+  void GetEncodedPacket(uint8_t*, FlowInfo*);
+  int AddPacketToNetCoder(gr_message_sptr msg, FlowInfo *fInfo, bool new_batch, bool fwder);
 
   void print_msg(gr_message_sptr);
+
+  // forwarder/credits, etc //
+  CreditWInfoVector d_creditWInfoVector;			// weights	(credit_w.txt)
+  CreditRInfoMap d_creditRInfoMap;				// redundancy	(credit_r.txt)
+  FlowCreditMap d_flowCreditMap;				// flow credits are updated
+
+  bool check_credit_PRO(bool blocking);
+  void resetCredit(FlowInfo*);
+  void updateCredit(FlowInfo *fInfo, NodeId prevHopId);
+  void populateCreditInfo();
+  void updateFwdQ_PRO(FlowId flowId, bool update);
+  vector<FlowId> d_flow_q;				// maintains the order in which flows need to be serviced //
 };
 
 #endif

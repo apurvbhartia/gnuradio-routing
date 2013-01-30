@@ -127,8 +127,8 @@ typedef struct pkt_str {
 typedef struct flow_info_str {
   NodeId src, dst, prevHopId, nextHopId;
   unsigned char flowId;
-  unsigned int active_batch;
-  int last_batch_acked;
+  int active_batch;
+  int last_batch_acked;				// can be -1 //
   unsigned int pkts_fwded;			// for the active_batch //
 
   unsigned int total_pkts_rcvd;
@@ -149,6 +149,16 @@ typedef struct scheduler_msg {
   int type;
 } SchedulerMsg;
 
+/* credits */
+typedef struct credit_info {
+  FlowId flowId;
+  NodeId prevHopId;
+  float weight;
+} CreditWInfo;
+
+typedef std::vector<CreditWInfo> CreditWInfoVector;          // redundancy
+typedef std::map<FlowId, float> CreditRInfoMap;              // weight
+typedef std::map<FlowId, float> FlowCreditMap;               // current credit
 
 
 class gr_message;

@@ -170,24 +170,26 @@ class ofdm_mod(gr.hier_block2):
 	self.connect((self._pkt_input, 2), gr.file_sink(gr.sizeof_char, "timing.dat"))
         self.connect((self._pkt_input, 3), gr.file_sink(gr.sizeof_char*options.fft_length, "timing_src.dat"))
 
-    def send_pkt(self, payload, type=0, eof=False):
+    def send_pkt(self, payload, _type=0, eof=False):
         """
         Send the payload.
 
         @param payload: data to send
         @type payload: string
         """
-	print "send_pkt"
+	print "send_pkt: type: ", _type, " eof: ", eof
         if eof:
             msg = gr.message(1) # tell self._pkt_input we're not sending any more packets
-        elif (type == 0):
+        elif (_type == 0):
 	    ############# print "original_payload =", string_to_hex_list(payload)
 	    #pkt = ofdm_packet_utils.make_packet(payload, 1, self._bits_per_symbol, self._fec_n, self._fec_k, self._pad_for_usrp, whitening=True)
             msg = gr.message_from_string(payload)
 	
-	if type == 0:
+	if _type == 0:
+	    print "source: send_pkt"
             self._pkt_input.msgq().insert_tail(msg)			# for source! 	(msg needs to be modulated in mapper)
 	else:
+	    print "fwd: send_pkt"
    	    self._pkt_input.msgq().insert_tail(payload)			# for forwarder! (payload is already modulated)
 
     def add_options(normal, expert):

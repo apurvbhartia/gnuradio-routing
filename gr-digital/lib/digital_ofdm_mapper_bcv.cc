@@ -110,6 +110,11 @@ digital_ofdm_mapper_bcv::digital_ofdm_mapper_bcv (const std::vector<gr_complex> 
   }
   fill_all_carriers_map();  
 
+  if(((HEADERBYTELEN*8) % d_data_carriers.size()) != 0) {       // assuming bpsk //
+     printf("HEADERBYTELEN: %d, size: %d\n", HEADERBYTELEN, d_data_carriers.size()); fflush(stdout);
+     assert(false);
+  }
+
   d_hdr_nbits = (unsigned long)ceil(log10(float(d_hdr_constellation.size())) / log10((float) 2.0));
   d_data_nbits = (unsigned long)ceil(log10(float(d_data_constellation.size())) / log10((float) 2.0));
 
@@ -130,6 +135,7 @@ digital_ofdm_mapper_bcv::digital_ofdm_mapper_bcv (const std::vector<gr_complex> 
   } 
   else if(d_proto == PRO) {
      create_e2e_ack_socks();
+     populateCreditInfo();			// both the weight and red. values //
   }
 
   if(d_tdma) {
@@ -250,7 +256,7 @@ digital_ofdm_mapper_bcv::check_for_ack(FlowInfo *fInfo) {
 	     MULTIHOP_ACK_HDR_TYPE ack;
        	     memcpy(&ack, ack_buf, buf_size);
 
-	     unsigned char ack_flow_id = ((int) ack.flow_id) + '0';
+	     FlowId ack_flow_id = ((int) ack.flow_id) + '0';
 	     int ack_pkt_type = ((int) ack.pkt_type);	
 
 	     printf("ACK received - pkt_type: %d, dst: %c, flow: %c\n", ack_pkt_type, ack.dst_id, ack_flow_id); fflush(stdout);
@@ -286,16 +292,6 @@ digital_ofdm_mapper_bcv::check_for_ack(FlowInfo *fInfo) {
    printf("check_for_ack - flowId: %c, n_extracted: %d\n", flowId, n_extracted); 
 }
 
-bool
-digital_ofdm_mapper_bcv::have_packet_to_send() {
-   if(d_source) 
-      return true;		// source always has a packet to send right now
-
-   if(d_msgq->empty_p())
-      return false;
-   return true;
-}
-
 void
 digital_ofdm_mapper_bcv::print_msg(gr_message_sptr msg) {
    int len = msg->length();
@@ -313,20 +309,23 @@ digital_ofdm_mapper_bcv::work(int noutput_items,
                               gr_vector_void_star &output_items)
 {
   FlowInfo *flowInfo = getFlowInfo(false, d_flow);
-  if(d_modulated && flowInfo->pkts_fwded > 0) {
-     check_for_ack(flowInfo);
+
+  /* branch out completely if PRO forwarder */
+  if(d_proto == PRO && !d_source) {
+     return work_forwarder_PRO(noutput_items, input_items, output_items);
+  }
+
+  if(d_modulated && flowInfo->pkts_fwded) {
+     check_for_ack(flowInfo);					// non-blocking //
   }
 
   if(d_modulated) {
-     /*
-     while(!have_packet_to_send()) {
-	sleep(0.5);
-     }*/
-
      if(d_proto == SPP)
         make_packet_SPP(flowInfo);				// blocking if no msg to send //
-     else
-	make_packet_PRO(flowInfo);
+     else if(d_proto == PRO) {
+	make_packet_PRO_source(flowInfo);
+     }
+
      print_msg(d_msg);
      if(d_tdma) {
         send_scheduler_msg(REQUEST_INIT_MSG);
@@ -353,12 +352,14 @@ digital_ofdm_mapper_bcv::make_packet_SPP(FlowInfo *flowInfo)
      assert(msg->length() > 0);
 
      add_crc_and_fec(msg, 0, 0);	     // creates the final d_msg
-     msg.reset();
+     if(!d_source) 
+	d_msg->set_header(msg->header());
 
      d_packetlen = d_msg->length();         // assume: all pkts in batch are of same length //
      d_num_ofdm_symbols = ceil(((float) ((d_packetlen) * 8))/(d_data_carriers.size() * d_data_nbits)); // include 'x55'
      printf("d_num_ofdm_symbols: %d, d_num_hdr_symbols: %d\n", d_num_ofdm_symbols, d_num_hdr_symbols); fflush(stdout);
      makeHeader(flowInfo);
+     msg.reset();
   }
   else {
      // retransmission! //
@@ -371,64 +372,9 @@ digital_ofdm_mapper_bcv::make_packet_SPP(FlowInfo *flowInfo)
   initializeBatchParams();
   d_pending_flag = 1;                             // start of packet flag //
 
-  if(((HEADERBYTELEN*8) % d_data_carriers.size()) != 0) {	// assuming bpsk //
-     printf("HEADERBYTELEN: %d, size: %d\n", HEADERBYTELEN, d_data_carriers.size()); fflush(stdout);
-     assert(false);
-  }
-
   initHeaderParams();
 
   d_preambles_sent = d_ofdm_symbol_index = d_null_symbol_cnt = d_hdr_ofdm_index = 0; 
-  d_pkt_num++;
-}
-
-inline void
-digital_ofdm_mapper_bcv::make_packet_PRO(FlowInfo *flowInfo)
-{
-  assert(d_modulated);
-  // if last batch was acked, then dequeue a fresh one //
-
-  gr_message_sptr msg[MAX_BATCH_SIZE];
-  int msg_len = 0;
-  if(flowInfo->last_batch_acked == flowInfo->active_batch) {
-     flowInfo->active_batch++;
-     printf("start active_batch: %d, last_batch_acked: %d\n", flowInfo->active_batch, flowInfo->last_batch_acked); fflush(stdout);
-     d_msg.reset();
-     for(unsigned int b = 0; b < d_batch_size; b++) {
-	 msg[b] = d_msgq->delete_head();
-	 assert(msg[b]->length() > 0);
-	 msg_len = msg[b]->length();
-     }
-
-     encodePacket_PRO(msg, flowInfo, msg_len, true);			// free 'msg' in this call 
-     d_packetlen = d_msg->length();
-
-     d_num_ofdm_symbols = ceil(((float) ((d_packetlen) * 8))/(d_data_carriers.size() * d_data_nbits));
-     printf("d_num_ofdm_symbols: %d, d_num_hdr_symbols: %d\n", d_num_ofdm_symbols, d_num_hdr_symbols); fflush(stdout);
-     makeHeader(flowInfo);
-  }
-  else {
-     // retransmission! //
-     assert(flowInfo->last_batch_acked < flowInfo->active_batch);
-     printf("retransmit batch: %d, last_batch_acked: %d, pkts_sent: %d\n",
-                flowInfo->active_batch, flowInfo->last_batch_acked, flowInfo->pkts_fwded); fflush(stdout);
-
-     encodePacket_PRO(msg, flowInfo, 0, false);
-     makeHeader(flowInfo);
-  }
-
-  d_modulated = false;
-  initializeBatchParams();
-  d_pending_flag = 1;                             // start of packet flag //
-
-  if(((HEADERBYTELEN*8) % d_data_carriers.size()) != 0) {       // assuming bpsk //
-     printf("HEADERBYTELEN: %d, size: %d\n", HEADERBYTELEN, d_data_carriers.size()); fflush(stdout);
-     assert(false);
-  }
-
-  initHeaderParams();
-
-  d_preambles_sent = d_ofdm_symbol_index = d_null_symbol_cnt = d_hdr_ofdm_index = 0;
   d_pkt_num++;
 }
 
@@ -797,11 +743,25 @@ digital_ofdm_mapper_bcv::makeHeader(FlowInfo *fInfo)
       d_header.pkt_num = d_pkt_num;			// unique number across all flows
       d_header.link_id = 0;
 
-      if(d_proto) 
-	memcpy(d_header.coeffs, fInfo->coeffs, MAX_BATCH_SIZE);
+      if(d_proto == PRO) 
+	 memcpy(d_header.coeffs, fInfo->coeffs, d_batch_size);
    }
    else {
-      d_header = d_msg->header();
+      if(d_proto == SPP) 
+         d_header = d_msg->header();
+      else if(d_proto == PRO) {
+	 memset(&d_header, 0, sizeof(d_header));
+	 d_header.flow_id = fInfo->flowId;
+	 d_header.src_id = fInfo->src;
+	 d_header.dst_id = fInfo->dst;
+	 d_header.prev_hop_id = d_id;
+	 d_header.next_hop_id = fInfo->nextHopId;		// useless field for PRO
+	 d_header.packetlen = d_packetlen;
+	 d_header.batch_number = fInfo->active_batch;
+	 d_header.pkt_num = d_pkt_num;
+	 d_header.link_id = 0;
+	 memcpy(d_header.coeffs, fInfo->coeffs, d_batch_size);
+      }
    }
 
    printf("makeHeader for batch: %d, pkt: %d, len: %d\n", d_header.batch_number, d_header.pkt_num, d_header.packetlen); 
@@ -858,6 +818,7 @@ digital_ofdm_mapper_bcv::add_crc_and_fec(gr_message_sptr msg, int fec_N, int fec
    memset(msg_data, 0, len+sizeof(calc_crc));
    memcpy(msg_data, msg->msg(), len);
 
+   printf("before crc: \n");
    for(int i = 0; i < len; i++) {
      printf("%02x", (unsigned char) msg_data[i]);
    }
@@ -868,6 +829,7 @@ digital_ofdm_mapper_bcv::add_crc_and_fec(gr_message_sptr msg, int fec_N, int fec
    memcpy(msg_data+len, &calc_crc, sizeof(calc_crc));
    len += sizeof(calc_crc);
 
+   printf("after crc: \n"); fflush(stdout);
    for(int i = 0; i < len; i++) {
      printf("%02x", (unsigned char) msg_data[i]);
    }
@@ -877,6 +839,7 @@ digital_ofdm_mapper_bcv::add_crc_and_fec(gr_message_sptr msg, int fec_N, int fec
 
    if(fec_N == 0 && fec_K == 0) {
       d_msg = gr_make_message(0, 0, 0, len);
+      //d_msg->set_header(msg->header());
       memcpy(d_msg->msg(), msg_data, len);
       return;
    }
@@ -1162,6 +1125,8 @@ digital_ofdm_mapper_bcv::getFlowInfo(bool create, unsigned char flowId)
      memset(flow_info, 0, sizeof(FlowInfo));
      flow_info->pkts_fwded = 0;
      flow_info->flowId = flowId;
+     flow_info->active_batch = -1;
+     flow_info->last_batch_acked = -1;
      d_flowInfoVector.push_back(flow_info);
   }
 
@@ -1257,79 +1222,6 @@ digital_ofdm_mapper_bcv::create_scheduler_sock() {
    d_scheduler_sock = open_client_sock(9000, "128.83.120.84", true);
 }
 
-/* encode all the packets in the fInfo->pkts and generate a new encode pkt */
-inline void
-digital_ofdm_mapper_bcv::encodePacket_PRO(gr_message_sptr *msg, FlowInfo *fInfo, int data_len, bool new_batch) {
-   printf("encodePacket_PRO - new_batch: %d\n", new_batch); fflush(stdout);
-   NetCoder *encoder = getNetCoder(fInfo->flowId, data_len);
-   if(!new_batch)
-     data_len = encoder->data_len;
-
-   /* add the packets to the encoder */
-   unsigned char *pkt = (unsigned char*) malloc(d_batch_size+data_len);
-   if(new_batch) {
-      encoder->num_pkts = 0;
-      for(int i = 0; i < d_batch_size; i++) {
-         for(int j = 0; j < d_batch_size; j++) {
-	    if(i == j) pkt[j] = 1;
-	    else pkt[j] = 0;
-         }
-
-         memcpy(pkt+d_batch_size, msg[i]->msg(), data_len);
-
-	 printf("original content - [%d]\n", i); fflush(stdout);
-	 for(int k = 0; k < data_len+d_batch_size; k++)
-            printf("%02X ", pkt[k]);
-         printf("\n");
-
-         encoder->AddPacket(pkt);
-         msg[i].reset();					 // done with this //
-      }
-   }
-
-   /* generate an encoded pkt */
-   pkt = encoder->Encode();
-   printf("encoded content - \n"); fflush(stdout);
-   for(int i = 0; i < d_batch_size+data_len; i++) 
-       printf("%02X ", pkt[i]);
-   printf("\n");
- 
-   /* copy the coeffs */
-   for(int i = 0; i < d_batch_size; i++) {
-      fInfo->coeffs[i] = pkt[i] & 0xff;
-      printf("coeff[%d]: %d\n", i, fInfo->coeffs[i]); fflush(stdout);
-   }
-
-   /* add crc and fec */
-   gr_message_sptr e_msg = gr_make_message(0, 0, 0, data_len);
-   memcpy(e_msg->msg(), &(pkt[d_batch_size]), data_len);
-   add_crc_and_fec(e_msg, 0, 0);
-
-   print_msg(d_msg);
-
-   /* clean up */
-   e_msg.reset();
-   free(pkt);
-}
-
-inline NetCoder*
-digital_ofdm_mapper_bcv::getNetCoder(FlowId flowId, int data_len) {
-   FlowNetCoderMap::iterator it = d_NetCoderMap.find(flowId);
-
-   if(data_len == 0) 
-     assert(it != d_NetCoderMap.end());
- 
-   NetCoder *netcoder = NULL;
-   if(it == d_NetCoderMap.end()) {
-      netcoder = new NetCoder(d_batch_size, data_len);
-      d_NetCoderMap.insert(std::pair<FlowId, NetCoder*> (flowId, netcoder));
-   }
-   else
-      netcoder = it->second;
-
-   return netcoder;
-}
-
 /* for PRO */
 inline void
 digital_ofdm_mapper_bcv::create_e2e_ack_socks() {
@@ -1350,4 +1242,443 @@ digital_ofdm_mapper_bcv::create_e2e_ack_socks() {
       it++;
   } 
   printf("(mapper): create_e2e_ack_socks num_socks: %d done!\n", d_sock_map.size()); fflush(stdout);
+}
+
+/* populates both the weight and the redundancy values for each node */
+inline void
+digital_ofdm_mapper_bcv::populateCreditInfo() {
+   printf("populateCreditInfo\n"); fflush(stdout);
+   // weight //
+   FILE *fl = fopen ( "credit_W.txt" , "r+" );
+   if (fl==NULL) {
+        fprintf (stderr, "File error\n");
+        assert(false);
+   }
+
+   char line[128];
+   const char *delim = " ";
+	 // flow  nodeId  prevNodeId  weight  //
+   while ( fgets ( line, sizeof(line), fl ) != NULL ) {
+        char *strtok_res = strtok(line, delim);
+        vector<char*> token;
+        while (strtok_res != NULL) {
+           token.push_back(strtok_res);
+           strtok_res = strtok (NULL, delim);
+        }
+
+        FlowId flowId = atoi(token[0])+'0';
+        char nodeId = atoi(token[1])+'0';
+        if(nodeId == d_id) {
+	   CreditWInfo wInfo; 
+           wInfo.flowId = flowId;
+           wInfo.prevHopId = atoi(token[2])+'0';
+           wInfo.weight = atof(token[3]);
+	   printf("flow: %c, prevHop: %c, weight: %f\n", flowId, wInfo.prevHopId, wInfo.weight); 
+	   d_creditWInfoVector.push_back(wInfo);
+	   d_flowCreditMap.insert(std::pair<FlowId, float> (flowId, 0.0));
+        }
+   }
+   fclose (fl);   
+
+   // redundancy //
+   printf("populateCreditInfo\n"); fflush(stdout);
+   fl = fopen ( "credit_R.txt" , "r+" );
+   if (fl==NULL) {
+        fprintf (stderr, "File error\n");
+        assert(false);
+   }
+	// flow  nodeId  redundancy  //
+   while ( fgets ( line, sizeof(line), fl ) != NULL ) {
+        char *strtok_res = strtok(line, delim);
+        vector<char*> token;
+        while (strtok_res != NULL) {
+           token.push_back(strtok_res);
+           strtok_res = strtok (NULL, delim);
+        }
+
+        FlowId flowId = atoi(token[0])+'0';
+        char nodeId = atoi(token[1])+'0';
+        if(nodeId == d_id) {
+	   float r_val = atof(token[2]); 
+	   d_creditRInfoMap.insert(std::pair<FlowId, float> (flowId, r_val));
+        }
+   }
+   fclose (fl);
+}
+
+inline NetCoder*
+digital_ofdm_mapper_bcv::getNetCoder(FlowId flowId, int data_len) {
+   FlowNetCoderMap::iterator it = d_NetCoderMap.find(flowId);
+
+   if(data_len == 0)
+     assert(it != d_NetCoderMap.end());
+
+   NetCoder *netcoder = NULL;
+   if(it == d_NetCoderMap.end()) {
+      netcoder = new NetCoder(d_batch_size, data_len);
+      d_NetCoderMap.insert(std::pair<FlowId, NetCoder*> (flowId, netcoder));
+   }
+   else
+      netcoder = it->second;
+
+   return netcoder;
+}
+
+inline void
+digital_ofdm_mapper_bcv::make_packet_PRO_source(FlowInfo *flowInfo)
+{
+  source_PRO(flowInfo);
+  makeHeader(flowInfo);
+  initializeBatchParams();
+  d_pending_flag = 1;                             // start of packet flag //
+
+  initHeaderParams();
+
+  d_preambles_sent = d_ofdm_symbol_index = d_null_symbol_cnt = d_hdr_ofdm_index = 0;
+  d_pkt_num++;
+  d_modulated = false;
+}
+
+inline void
+digital_ofdm_mapper_bcv::source_PRO(FlowInfo *flowInfo) {
+  gr_message_sptr msg[MAX_BATCH_SIZE];
+  int data_len = 0;
+
+  if(flowInfo->last_batch_acked == flowInfo->active_batch) {
+     // if last batch was acked, then dequeue a fresh one //
+     flowInfo->active_batch++;
+     printf("start active_batch: %d, last_batch_acked: %d\n", flowInfo->active_batch, flowInfo->last_batch_acked); fflush(stdout);
+     d_msg.reset();
+     for(unsigned int b = 0; b < d_batch_size; b++) {
+         msg[b] = d_msgq->delete_head();
+         assert(msg[b]->length() > 0);
+         data_len = msg[b]->length();
+	 AddPacketToNetCoder(msg[b], flowInfo, !b, false);
+	 msg[b].reset();
+     }
+  }
+  else {
+     // retransmission! //
+     assert(flowInfo->last_batch_acked < flowInfo->active_batch);
+     printf("retransmit batch: %d, last_batch_acked: %d, pkts_sent: %d\n",
+                flowInfo->active_batch, flowInfo->last_batch_acked, flowInfo->pkts_fwded); fflush(stdout);
+
+     NetCoder *encoder = getNetCoder(flowInfo->flowId, 0);
+     data_len = encoder->data_len;
+  }
+
+  /* get a fresh encoded pkt from NetCoder */
+  uint8_t *pkt = (uint8_t*) malloc(d_batch_size+data_len);
+  GetEncodedPacket(pkt, flowInfo);
+
+   printf("debug encoded content - \n"); fflush(stdout);
+   for(int i = 0; i < d_batch_size+data_len; i++)
+       printf("%02X ", pkt[i]);
+   printf("\n");
+
+
+  /* add crc and fec */
+  gr_message_sptr e_msg = gr_make_message(0, 0, 0, data_len);
+  memcpy(e_msg->msg(), &(pkt[d_batch_size]), data_len);
+  add_crc_and_fec(e_msg, 0, 0);
+
+  /* clean up */
+  free(pkt); e_msg.reset();
+
+  print_msg(d_msg); 
+  d_packetlen = d_msg->length();
+  
+  d_num_ofdm_symbols = ceil(((float) ((d_packetlen) * 8))/(d_data_carriers.size() * d_data_nbits));
+  printf("d_num_ofdm_symbols: %d, d_num_hdr_symbols: %d\n", d_num_ofdm_symbols, d_num_hdr_symbols); fflush(stdout);
+}
+
+/* adds the packet to NetCoder. Ensure the netcoder is flushed for a new batch. It also creates
+   the packet in the format reqd by the NetCoder
+*/
+inline int
+digital_ofdm_mapper_bcv::AddPacketToNetCoder(gr_message_sptr msg, FlowInfo *fInfo, bool new_batch, bool fwder) {
+   printf("AddPacketToNetCoder flow: %c, new_batch: %d, is_fwder: %d\n", 
+				fInfo->flowId, new_batch, fwder); fflush(stdout);
+   int data_len = msg->length();
+   NetCoder *encoder = getNetCoder(fInfo->flowId, data_len);
+   if(new_batch) encoder->num_pkts = 0;                         // flush //
+
+   int rank = encoder->num_pkts;
+   uint8_t *pkt = (uint8_t*) malloc(d_batch_size+data_len);
+   memset(pkt, 0, d_batch_size+data_len);
+
+   if(!fwder)
+      pkt[rank] = 1;
+   else {
+      for(int i = 0; i < d_batch_size; i++) 
+	 pkt[i] = fInfo->coeffs[i];
+   }
+   memcpy(pkt+d_batch_size, msg->msg(), data_len);
+
+   printf("encoded pkt added to NetCoder, before adding rank: %d\n", rank); fflush(stdout);
+   for(int k = 0; k < data_len+d_batch_size; k++)
+       printf("%02X ", pkt[k]);
+   printf("\n");
+
+   encoder->AddPacket(pkt);
+   printf("encoded pkt added to NetCoder, after adding rank: %d\n", encoder->num_pkts); fflush(stdout);
+   free(pkt);
+
+   return encoder->num_pkts;
+}
+
+inline void
+digital_ofdm_mapper_bcv::GetEncodedPacket(uint8_t *pkt, FlowInfo *fInfo) {
+   NetCoder *encoder = getNetCoder(fInfo->flowId, 0);
+   int data_len = encoder->data_len;
+
+   printf("GetEncodedPacket, flow: %c, data_len: %d\n", fInfo->flowId, data_len); fflush(stdout);
+   uint8_t *tmp_pkt = (uint8_t*) malloc(d_batch_size+data_len);
+   memset(tmp_pkt, 0, d_batch_size+data_len);
+
+   printf("just before encode..\n"); fflush(stdout);
+   tmp_pkt = encoder->Encode();
+   printf("just after encode.. rank: %d\n", encoder->num_pkts); fflush(stdout);
+   for(int i = 0; i < d_batch_size+data_len; i++)
+       printf("%02X ", tmp_pkt[i]);
+   printf("\n");
+
+   memcpy(pkt, tmp_pkt, d_batch_size+data_len);
+   printf("encoded content - \n"); fflush(stdout);
+   for(int i = 0; i < d_batch_size+data_len; i++)
+       printf("%02X ", pkt[i]);
+   printf("\n"); 
+
+   /* copy the coeffs */
+   for(int i = 0; i < d_batch_size; i++) {
+       fInfo->coeffs[i] = pkt[i] & 0xff;
+       printf("coeff[%d]: %d\n", i, fInfo->coeffs[i]); fflush(stdout);
+   }
+
+   free(tmp_pkt);
+}
+
+/* check the credit, if credit >= 1.0, then send a scheduler request. 
+   Get the scheduler reply, then again quickly check if any credit updates arrived
+   in the meantime. Ensure some credit>=1.0, and do the transmission. If
+   the credit<1.0 in the 2nd phase, then send a scheduler complete message.
+*/
+inline int
+digital_ofdm_mapper_bcv::work_forwarder_PRO(int noutput_items,
+                              gr_vector_const_void_star &input_items,
+                              gr_vector_void_star &output_items) {
+   if(d_modulated) {
+      bool request_sent = false;
+      while(1) {
+         bool tx_ok = check_credit_PRO(true);		// blocking!
+         if(!tx_ok) continue;
+
+         if(d_tdma) {
+	    if(!request_sent) 
+	       send_scheduler_msg(REQUEST_INIT_MSG);
+	    request_sent = true;
+
+            while(!check_scheduler_reply()) {
+	       sleep(0.65);
+	    }
+
+	    tx_ok = check_credit_PRO(false);	 	// non-blocking!
+	    if(!tx_ok) { 
+	       send_scheduler_msg(REQUEST_COMPLETE_MSG);
+	       request_sent = false;
+	       continue;
+	    }
+         }
+         break;
+      } // while
+      make_time_tag();
+      make_packet_PRO_fwd();				// make the packet
+   }
+
+   assert(d_flow > 0);					// must be set in make_packet_PRO_fwd()
+   FlowInfo *fInfo = getFlowInfo(false, d_flow);
+   return modulate_and_send(noutput_items, input_items, output_items, fInfo);   
+}
+
+/* creates a packet for the forwarder */
+inline void
+digital_ofdm_mapper_bcv::make_packet_PRO_fwd() {
+   assert(d_modulated);
+   assert(d_flow_q.size() >= 1);
+   FlowId flowId = d_flow_q.front();
+   d_flow_q.erase(d_flow_q.begin());
+
+   FlowInfo *fInfo = getFlowInfo(false, flowId);
+   d_flow = flowId;
+
+   NetCoder *encoder = getNetCoder(flowId, 0); 
+   int data_len = encoder->data_len;
+
+    printf("make_packet_PRO_fwd .. flowId: %c, data_len: %d\n", flowId, data_len); fflush(stdout);
+   uint8_t *pkt = (uint8_t*) malloc(d_batch_size+data_len);
+   GetEncodedPacket(pkt, fInfo); 
+
+   /* add crc and fec */
+   gr_message_sptr e_msg = gr_make_message(0, 0, 0, data_len);
+   memcpy(e_msg->msg(), &(pkt[d_batch_size]), data_len);
+   add_crc_and_fec(e_msg, 0, 0);
+
+   /* clean up */
+   free(pkt); e_msg.reset();
+
+   print_msg(d_msg);
+   d_packetlen = d_msg->length();
+   d_num_ofdm_symbols = ceil(((float) ((d_packetlen) * 8))/(d_data_carriers.size() * d_data_nbits));
+   printf("d_num_ofdm_symbols: %d, d_num_hdr_symbols: %d\n", d_num_ofdm_symbols, d_num_hdr_symbols); fflush(stdout);
+
+   makeHeader(fInfo);
+   initializeBatchParams();
+   d_pending_flag = 1;                             // start of packet flag //
+
+   initHeaderParams();
+
+   d_preambles_sent = d_ofdm_symbol_index = d_null_symbol_cnt = d_hdr_ofdm_index = 0;
+   d_pkt_num++;
+   d_modulated = false;
+}
+
+/* updates (increases) the credit for (flowId, prevHopId) for all nextHopId entries */
+inline void
+digital_ofdm_mapper_bcv::updateCredit(FlowInfo *fInfo, NodeId prevHopId) {
+ 
+   // get the weight //
+   CreditWInfo wInfo;
+   for(int i = 0; i < d_creditWInfoVector.size(); i++) {
+       wInfo = d_creditWInfoVector[i];
+       if(wInfo.flowId == fInfo->flowId && wInfo.prevHopId == prevHopId) 
+	  break;	  
+   }
+
+   // get the redundancy //
+   CreditRInfoMap::iterator it = d_creditRInfoMap.find(fInfo->flowId);
+   assert(it != d_creditRInfoMap.end());
+   float red_val = it->second;
+
+   // update the credit //
+   FlowCreditMap::iterator fit = d_flowCreditMap.find(fInfo->flowId);
+   assert(fit != d_flowCreditMap.end());
+   float credit = fit->second;
+   credit += (wInfo.weight*red_val);
+
+   printf("updateCredit: flow: %c, prevHop: %c, old_credit: %f, new_credit: %f\n", 
+			fInfo->flowId, prevHopId, fit->second, credit); fflush(stdout);
+
+   // enqueue the pkt placeholders //
+   while(credit >= 1.0) {
+      updateFwdQ_PRO(fInfo->flowId, true);
+      credit -= 1.0;
+   }
+
+   d_flowCreditMap.erase(fit);
+   d_flowCreditMap.insert(std::pair<FlowId, float> (fInfo->flowId, credit));
+}
+
+/* reset the credit for the flowId */
+inline void
+digital_ofdm_mapper_bcv::resetCredit(FlowInfo *fInfo) {
+   if(fInfo->active_batch == -1)
+      return;
+
+   printf("resetCredit, flow: %c\n", fInfo->flowId); fflush(stdout);
+   FlowCreditMap::iterator fit = d_flowCreditMap.find(fInfo->flowId);
+   assert(fit != d_flowCreditMap.end());
+   d_flowCreditMap.erase(fit);
+   d_flowCreditMap.insert(std::pair<FlowId, float> (fInfo->flowId, 0.0));   
+
+   updateFwdQ_PRO(fInfo->flowId, false);			// remove all entries of this flow from flow_Q //
+
+   NetCoder *encoder = getNetCoder(fInfo->flowId, 0);
+   encoder->num_pkts = 0; 
+}
+
+/* check the queue if any more packets received from the sink - 
+   - if yes, then update the credit 
+   - update the fwd_Q if required 
+*/
+inline bool
+digital_ofdm_mapper_bcv::check_credit_PRO(bool blocking) {
+   printf("check_credit_PRO, blocking :%d\n", blocking); fflush(stdout);
+   gr_message_sptr msg;
+   if(blocking) 
+      msg = d_msgq->delete_head();
+   else 
+      msg = d_msgq->delete_head_nowait();
+
+   if(msg != 0) {
+      MULTIHOP_HDR_TYPE hdr = msg->header();
+
+      unsigned short batchId = hdr.batch_number;
+      FlowId flowId = ((int) hdr.flow_id) + '0';
+      NodeId prevHopId = ((int)hdr.prev_hop_id) + '0';
+      FlowInfo *fInfo = getFlowInfo(false, flowId);
+
+        // copy the coeffs //
+      for(int i = 0; i < d_batch_size; i++)
+	 fInfo->coeffs[i] = hdr.coeffs[i];
+	
+      assert(fInfo != NULL);
+
+      if((batchId < fInfo->active_batch) && (fInfo->active_batch != -1)) {
+	 // stale batch - complete ignore //
+	 printf("Stale batch, batchId: %d, active_batch: %d\n", batchId, fInfo->active_batch); fflush(stdout);
+	 msg.reset();
+	 return false;
+      } else if((batchId > fInfo->active_batch) || (fInfo->active_batch == -1)) {
+	 // new batch - reset encoder, credit, flow_Q, batch details, etc //
+	 printf("Jumping to batch, batchId: %d, active_batch: %d\n", batchId, fInfo->active_batch);
+	 resetCredit(fInfo);
+         fInfo->active_batch = batchId;
+	 fInfo->last_batch_acked = batchId-1;
+      }
+
+      printf("flow: %c, batch: %d, prevHop: %c, active_batch: %d\n", flowId, batchId, prevHopId, fInfo->active_batch);
+      fflush(stdout);
+
+	// now update the credit //
+      updateCredit(fInfo, prevHopId);
+
+	// add the msg to the netcoder (after innovative check) //      
+      NetCoder *encoder = getNetCoder(flowId, msg->length());
+      int rank = encoder->num_pkts;
+      assert(rank <= d_batch_size);	
+
+      if(rank == d_batch_size) { 
+	 printf("non-innovative packet, rank: %d\n", rank); fflush(stdout);
+      }
+      else 
+         AddPacketToNetCoder(msg, fInfo, false, true);
+
+      msg.reset();
+   }
+
+   return (d_flow_q.size() > 0);
+}
+
+/* this Q contains the flows for which credit >= 1.0 (time order is maintained) 
+   1. update - add the flow if its credit now is >= 1.0
+   2. delete (!update) - if the flow was ACKed before it could be sent out
+*/
+inline void
+digital_ofdm_mapper_bcv::updateFwdQ_PRO(FlowId flowId, bool update) {
+   bool _delete = !update;
+
+   if(_delete) { 
+      vector<FlowId>::iterator fit = d_flow_q.begin();
+      while(fit != d_flow_q.end()) {
+         if(*fit == flowId) {
+	    d_flow_q.erase(fit);
+	    fit = d_flow_q.begin();
+	    continue;
+         }
+         fit++;	
+      }
+      return;
+   }
+
+   d_flow_q.push_back(flowId);
 }

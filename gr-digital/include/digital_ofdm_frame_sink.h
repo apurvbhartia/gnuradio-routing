@@ -536,13 +536,9 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
   /* apurv end */
 
   /* fwder operations */
-  void makePacket(std::string, FlowInfo*); 		
-  
-
-  /* credits */
-  CreditInfoVector d_creditInfoVector;
-  void populateCreditInfo();
-  void updateCredit();
+  void makePacket_SPP(std::string, FlowInfo*);
+  CreditWInfoVector d_weightInfoVector; 
+  void populateCreditWeightInfo();
 
   /* ACKs */
   unsigned int num_acks_sent;
@@ -612,5 +608,6 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
  FlowNetCoderMap d_NetCoderMap;
  NetCoder* getNetCoder(FlowId, int);
  bool decodePacket(std::string encoded_msg, FlowInfo *fInfo);
+ void makePacket_PRO(std::string, FlowInfo*);
 };
 #endif /* INCLUDED_GR_OFDM_FRAME_SINK_H */
