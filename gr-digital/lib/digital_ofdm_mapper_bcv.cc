@@ -89,6 +89,8 @@ digital_ofdm_mapper_bcv::digital_ofdm_mapper_bcv (const std::vector<gr_complex> 
     d_tdma(tdma),
     d_proto(proto)
 {
+
+  srand((int) d_id);
   if (!(d_occupied_carriers <= d_fft_length))
     throw std::invalid_argument("digital_ofdm_mapper_bcv: occupied carriers must be <= fft_length");
 
@@ -127,10 +129,10 @@ digital_ofdm_mapper_bcv::digital_ofdm_mapper_bcv (const std::vector<gr_complex> 
   d_time_pkt_sent = 0;
 
   populateFlowInfo();
-  populateRouteInfo();
   populateEthernetAddress();
 
   if(d_proto == SPP) {
+     populateRouteInfo();
      create_ack_socks();
   } 
   else if(d_proto == PRO) {
