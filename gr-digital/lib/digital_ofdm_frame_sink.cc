@@ -882,7 +882,7 @@ digital_ofdm_frame_sink::shouldProcess(FlowInfo *fInfo) {
   if(hdr_dst == d_id && hdr_flow == fInfo->flowId)
      d_dst = true;
   
-  if(d_proto == SPP && hdr_next_hop == d_id && hdr_flow == fInfo->flowId) 
+  else if(d_proto == SPP && hdr_next_hop == d_id && hdr_flow == fInfo->flowId) 
      d_fwd = true;
   else if(d_proto == PRO) {
      CreditWInfoVector::iterator it = d_weightInfoVector.begin();
