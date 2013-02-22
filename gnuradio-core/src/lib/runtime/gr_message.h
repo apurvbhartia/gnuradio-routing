@@ -29,11 +29,13 @@
 #include <uhd/usrp/multi_usrp.hpp>
 
 #define MAX_FFT_LENGTH 96
-#define MAX_DATA_CARRIERS 72
+#define MAX_OCCUPIED_CARRIERS 80
+#define MAX_DATA_CARRIERS 64
+#define MAX_OFDM_SYMBOLS 70
 
 /* apurv++ define header type */
 #define MAX_BATCH_SIZE     2 
-#define PADDING_SIZE       4
+#define PADDING_SIZE       0
 #define UNASSIGNED 100
 #define ACK_PADDING_SIZE 6
 
@@ -46,11 +48,18 @@
 #define REQUEST_INIT_MSG 1
 #define REPLY_MSG 2
 #define REQUEST_COMPLETE_MSG 3
+#define REQUEST_ABORT_MSG 4
+
+/* trigger msgs */
+#define TRIGGER_START 1
+#define TRIGGER_ABORT 2
 
 /* protocols */
 #define SPP 0
 #define PRO 1
+#define CF 2
 
+#define MAX_SENDERS 4
 
 typedef struct coeff_str {
   unsigned short phase;				// scaled
@@ -80,6 +89,12 @@ typedef struct multihop_hdr_type {
   // 1
   unsigned char link_id;
 
+  // 1
+  unsigned char nsenders;
+
+  // 1
+  unsigned char lead_sender;
+
   // 2 bytes
   unsigned char coeffs[MAX_BATCH_SIZE];		   // only used for PRO; empty (0) when not used
    
@@ -106,6 +121,7 @@ typedef struct ack_multihop_hdr_type {
 
 } MULTIHOP_ACK_HDR_TYPE;
 
+typedef unsigned char LinkId;				// composite link (CF) 
 typedef unsigned char NodeId;
 typedef unsigned char FlowId;
 typedef int SockId;
@@ -126,10 +142,12 @@ typedef struct pkt_str {
 
 typedef struct flow_info_str {
   NodeId src, dst, prevHopId, nextHopId;
-  unsigned char flowId;
+  FlowId flowId;
+  LinkId prevLinkId, nextLinkId;		// used only by CF //
   int active_batch;
   int last_batch_acked;				// can be -1 //
   unsigned int pkts_fwded;			// for the active_batch //
+  int packetlen;
 
   unsigned int total_pkts_rcvd;
   unsigned int num_pkts_correct;
@@ -147,12 +165,32 @@ typedef struct scheduler_msg {
   int request_id;
   NodeId nodeId;
   int type;
+
+  /* these fields used only for CF */
+  short num_tx;
+  unsigned char lead_sender;
+  unsigned char flow;
+  unsigned int batch_num;			// even if batch_size = 1, batch_num is not pkt_num, since multiple retx might happen for same batch
+  unsigned char senders[MAX_SENDERS];
 } SchedulerMsg;
+
+typedef struct trigger_msg {
+  NodeId lead_id;
+  short num_tx;
+  FlowId flow;
+  unsigned int batch_num;
+  unsigned char senders[MAX_SENDERS];
+  uint64_t secs;
+  double frac_secs;
+  short type;					// START, ABORT
+} TriggerMsg;
+
 
 /* credits */
 typedef struct credit_info {
   FlowId flowId;
   NodeId prevHopId;
+  LinkId prevLinkId;
   float weight;
 } CreditWInfo;
 
@@ -160,6 +198,29 @@ typedef std::vector<CreditWInfo> CreditWInfoVector;          // redundancy
 typedef std::map<FlowId, float> CreditRInfoMap;              // weight
 typedef std::map<FlowId, float> FlowCreditMap;               // current credit
 
+/* for CF */
+typedef struct credit {
+  FlowId flowId;
+  NodeId prevLinkId;
+  LinkId nextLinkId;
+  float delta_credit;
+  float curr_credit;
+} CreditInfo_CF;
+typedef std::vector<CreditInfo_CF*> CreditInfoVector_CF;
+
+/* for CF */
+typedef struct composite_link_str {
+  LinkId linkId;
+  NodeIds srcIds;
+  NodeIds dstIds;
+} CompositeLink;
+typedef std::vector<CompositeLink*> CompositeLinkVector;
+
+/* for CF 
+  used to store the signals of the same batch which can be combined 
+  using equal gain or mrc */
+typedef std::vector<gr_complex*> PktSymbolsVector;			// vector of packets //
+typedef std::map<FlowId, PktSymbolsVector*> FlowPktVector;		// "above" .. for a flow //
 
 class gr_message;
 typedef boost::shared_ptr<gr_message> gr_message_sptr;

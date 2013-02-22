@@ -59,8 +59,6 @@
 
 #define MAX_SENDERS 4
 
-#define MAX_OFDM_SYMBOLS 170
-#define MAX_OCCUPIED_CARRIERS 88
 #define MAX_PKT_LEN 4096
 
 // apurv for logging ends //
@@ -86,7 +84,8 @@ digital_make_ofdm_frame_sink (const std::vector<gr_complex> &hdr_sym_position,
 /* credits */
 typedef struct credit_str {
   unsigned char flowId;
-  NodeId prevHopId, nextHopId;
+  LinkId prevLinkId;			// for CF
+  NodeId prevHopId;
   float credit_val, delta_credit;
 } CreditInfo;
 typedef vector<CreditInfo*> CreditInfoVector;
@@ -540,19 +539,6 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
   CreditWInfoVector d_weightInfoVector; 
   void populateCreditWeightInfo();
 
-  /* ACKs */
-  unsigned int num_acks_sent;
-  MULTIHOP_ACK_HDR_TYPE d_ack_header;
-  deque<gr_message_sptr> d_ack_queue;
-  map<unsigned char, unsigned char> d_ack_route_map;						// flow, prev_hop
-  void processACK();
-  void sendACK(unsigned char flow, unsigned char batch);  
-  void forwardACK();
-  bool shouldFowardACK(unsigned char flowId, unsigned char prevHop);
-  void extract_ack_header();
-  bool ack_header_ok();
-  void fillAckRouteMap();
-
   /* pilots */
   void assign_subcarriers();
   void fill_all_carriers_map();
@@ -609,5 +595,16 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
  NetCoder* getNetCoder(FlowId, int);
  bool decodePacket(std::string encoded_msg, FlowInfo *fInfo);
  void makePacket_PRO(std::string, FlowInfo*);
+
+ // ---------------------------------- CF ----------------------------------- //
+ int d_sender_index;
+ CompositeLinkVector d_compositeLinkVector;
+
+ CompositeLink* getCompositeLink(LinkId);
+ void populateCompositeLinkInfo_CF();
+ bool shouldProcess_CF(FlowInfo*);
+ void makePacket_CF(FlowInfo *fInfo);
+
+ // --------------------------------- CF ends ------------------------------- //
 };
 #endif /* INCLUDED_GR_OFDM_FRAME_SINK_H */

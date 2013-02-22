@@ -139,6 +139,11 @@ digital_ofdm_mapper_bcv::digital_ofdm_mapper_bcv (const std::vector<gr_complex> 
      create_e2e_ack_socks();
      populateCreditInfo();			// both the weight and red. values //
   }
+  else if(d_proto == CF) {
+     create_e2e_ack_socks();
+     populateCreditInfo_CF();
+     open_trigger_sock_CF();
+  }
 
   if(d_tdma) {
     create_scheduler_sock();
@@ -310,11 +315,17 @@ digital_ofdm_mapper_bcv::work(int noutput_items,
                               gr_vector_const_void_star &input_items,
                               gr_vector_void_star &output_items)
 {
+  /* branch out completely if CF */
+  if(d_proto == CF) {
+     return work_CF(noutput_items, input_items, output_items);
+  }
+
   FlowInfo *flowInfo = getFlowInfo(false, d_flow);
 
   /* branch out completely if PRO forwarder */
-  if(d_proto == PRO && !d_source) {
-     return work_forwarder_PRO(noutput_items, input_items, output_items);
+  if(!d_source) {
+     if(d_proto == PRO) 
+        return work_forwarder_PRO(noutput_items, input_items, output_items);
   }
 
   if(d_modulated && flowInfo->pkts_fwded) {
@@ -322,7 +333,7 @@ digital_ofdm_mapper_bcv::work(int noutput_items,
   }
 
   if(d_modulated) {
-     if(d_proto == SPP)
+     if(d_proto == SPP || d_proto == CF)
         make_packet_SPP(flowInfo);				// blocking if no msg to send //
      else if(d_proto == PRO) {
 	make_packet_PRO_source(flowInfo);
@@ -331,20 +342,23 @@ digital_ofdm_mapper_bcv::work(int noutput_items,
      print_msg(d_msg);
      if(d_tdma) {
         send_scheduler_msg(REQUEST_INIT_MSG);
-        while(!check_scheduler_reply()) {
+	SchedulerMsg reply;
+        while(!check_scheduler_reply(reply)) {
            sleep(0.65);
         }
      }
-     make_time_tag();
+     make_time_tag(uhd::time_spec_t(0, 0), false);		// dumb params here
   }
 
   return modulate_and_send(noutput_items, input_items, output_items, flowInfo);
 }
 
+/* this should work for both SPP and CF (unless we decide to send in 'batches') */
 void
 digital_ofdm_mapper_bcv::make_packet_SPP(FlowInfo *flowInfo)
 {
   assert(d_modulated);
+  assert(d_batch_size == 1);
   // if last batch was acked, then dequeue a fresh one //
   if(flowInfo->last_batch_acked == flowInfo->active_batch) {
      flowInfo->active_batch++;
@@ -354,8 +368,10 @@ digital_ofdm_mapper_bcv::make_packet_SPP(FlowInfo *flowInfo)
      assert(msg->length() > 0);
 
      add_crc_and_fec(msg, 0, 0);	     // creates the final d_msg
-     if(!d_source) 
+     if(!d_source) { 
+	assert(d_proto == SPP);
 	d_msg->set_header(msg->header());
+     }
 
      d_packetlen = d_msg->length();         // assume: all pkts in batch are of same length //
      d_num_ofdm_symbols = ceil(((float) ((d_packetlen) * 8))/(d_data_carriers.size() * d_data_nbits)); // include 'x55'
@@ -421,8 +437,12 @@ digital_ofdm_mapper_bcv::modulate_and_send(int noutput_items,
   else if(!d_send_null) {
 
       assert(d_pending_flag == 0);
+
 	// send the data symbols now //
-      generateOFDMSymbolData(out); 
+      if(d_proto == CF && !d_source) 
+	 copyOFDMSymbolData_CF(out);
+      else 
+	 generateOFDMSymbolData(out); 
 
  	// offline, timekeeping, etc //
       assert(d_ofdm_symbol_index < d_num_ofdm_symbols);
@@ -751,18 +771,24 @@ digital_ofdm_mapper_bcv::makeHeader(FlowInfo *fInfo)
    else {
       if(d_proto == SPP) 
          d_header = d_msg->header();
-      else if(d_proto == PRO) {
+      else if(d_proto == PRO || d_proto == CF) {
 	 memset(&d_header, 0, sizeof(d_header));
 	 d_header.flow_id = fInfo->flowId;
 	 d_header.src_id = fInfo->src;
 	 d_header.dst_id = fInfo->dst;
-	 d_header.prev_hop_id = d_id;
-	 d_header.next_hop_id = fInfo->nextHopId;		// useless field for PRO
-	 d_header.packetlen = d_packetlen;
 	 d_header.batch_number = fInfo->active_batch;
 	 d_header.pkt_num = d_pkt_num;
-	 d_header.link_id = 0;
-	 memcpy(d_header.coeffs, fInfo->coeffs, d_batch_size);
+	 d_header.prev_hop_id = d_id;
+
+	 if(d_proto == PRO) {
+	    d_header.packetlen = d_packetlen;
+	    d_header.next_hop_id = fInfo->nextHopId;		// useless field for PRO
+	    memcpy(d_header.coeffs, fInfo->coeffs, d_batch_size);
+	 }
+	 else if(d_proto == CF) {
+	    d_header.packetlen = fInfo->packetlen;
+	    d_header.link_id = fInfo->nextLinkId;
+	 }
       }
    }
 
@@ -851,9 +877,8 @@ digital_ofdm_mapper_bcv::add_crc_and_fec(gr_message_sptr msg, int fec_N, int fec
    // TODO: add fec digital_tx_wrapper
 }
 
-/* in the work_source() mode to just test if trigger on ethernet works */
 inline void
-digital_ofdm_mapper_bcv::make_time_tag() {
+digital_ofdm_mapper_bcv::make_time_tag(uhd::time_spec_t out_time, bool enforce) {
 
   /* calculate the time reqd to send the preamble+header */
   int decimation = 128;
@@ -872,19 +897,22 @@ digital_ofdm_mapper_bcv::make_time_tag() {
   uhd::time_spec_t duration_time = uhd::time_spec_t(sync_secs, sync_frac_of_secs);
 
   uhd::time_spec_t c_time = d_usrp->get_time_now();           // current time //
-  uhd::time_spec_t out_time = c_time + duration_time;         // scheduled out time //
 
-  /* check if the interval from the last packet sent is atleast the duration */
-  uhd::time_spec_t interval_time = out_time - d_last_pkt_time;    // interval between the transmissions //
-  if(interval_time < duration_time) {
-     uhd::time_spec_t extra_gap_time = duration_time - interval_time;
-     out_time += extra_gap_time;
-     interval_time += extra_gap_time;
+  if(!enforce) {
+     out_time = c_time + duration_time;         // scheduled out time //
+
+     /* check if the interval from the last packet sent is atleast the duration */
+     uhd::time_spec_t interval_time = out_time - d_last_pkt_time;    // interval between the transmissions //
+     if(interval_time < duration_time) {
+        uhd::time_spec_t extra_gap_time = duration_time - interval_time;
+        out_time += extra_gap_time;
+        interval_time += extra_gap_time;
+     }
+
+     uint64_t interval_samples = (interval_time.get_frac_secs() * 1e8)/decimation;
+
+     printf("timestamp: curr (%llu, %f), out (%llu, %f) , last_time (%llu, %f), interval(%lld, %f), interval_samples(%llu), duration(%llu, %f)\n", (uint64_t) c_time.get_full_secs(), c_time.get_frac_secs(), (uint64_t) out_time.get_full_secs(), out_time.get_frac_secs(), (uint64_t) d_last_pkt_time.get_full_secs(), d_last_pkt_time.get_frac_secs(), (int64_t) interval_time.get_full_secs(), interval_time.get_frac_secs(), interval_samples, sync_secs, sync_frac_of_secs); fflush(stdout);
   }
-
-  uint64_t interval_samples = (interval_time.get_frac_secs() * 1e8)/decimation;
-
-  printf("timestamp: curr (%llu, %f), out (%llu, %f) , last_time (%llu, %f), interval(%lld, %f), interval_samples(%llu), duration(%llu, %f)\n", (uint64_t) c_time.get_full_secs(), c_time.get_frac_secs(), (uint64_t) out_time.get_full_secs(), out_time.get_frac_secs(), (uint64_t) d_last_pkt_time.get_full_secs(), d_last_pkt_time.get_frac_secs(), (int64_t) interval_time.get_full_secs(), interval_time.get_frac_secs(), interval_samples, sync_secs, sync_frac_of_secs); fflush(stdout);
 
   assert(out_time > c_time);
   d_out_pkt_time = out_time;
@@ -1130,6 +1158,12 @@ digital_ofdm_mapper_bcv::getFlowInfo(bool create, unsigned char flowId)
      flow_info->active_batch = -1;
      flow_info->last_batch_acked = -1;
      d_flowInfoVector.push_back(flow_info);
+
+     if(d_proto == CF) {
+	PktSymbolsVector *pv = (PktSymbolsVector*) malloc(sizeof(PktSymbolsVector));
+        memset(pv, 0, sizeof(PktSymbolsVector));
+	d_flowPktVector.insert(std::pair<FlowId, PktSymbolsVector*> (flowId, pv));
+     }	
   }
 
   return flow_info;
@@ -1188,12 +1222,11 @@ digital_ofdm_mapper_bcv::send_scheduler_msg(int type) {
 }
 
 inline bool
-digital_ofdm_mapper_bcv::check_scheduler_reply() {
+digital_ofdm_mapper_bcv::check_scheduler_reply(SchedulerMsg& reply) {
    int buf_size = sizeof(SchedulerMsg);
    char *buf = (char*) malloc(buf_size);
    memset(buf, 0, buf_size);
 
-   SchedulerMsg reply;   
    reply.request_id = -1;
 
    int nbytes = recv(d_scheduler_sock, buf, buf_size, MSG_PEEK);
@@ -1480,7 +1513,8 @@ digital_ofdm_mapper_bcv::work_forwarder_PRO(int noutput_items,
 	       send_scheduler_msg(REQUEST_INIT_MSG);
 	    request_sent = true;
 
-            while(!check_scheduler_reply()) {
+	    SchedulerMsg reply;
+            while(!check_scheduler_reply(reply)) {
 	       sleep(0.65);
 	    }
 
@@ -1493,7 +1527,7 @@ digital_ofdm_mapper_bcv::work_forwarder_PRO(int noutput_items,
          }
          break;
       } // while
-      make_time_tag();
+      make_time_tag(uhd::time_spec_t(0, 0), false);
       make_packet_PRO_fwd();				// make the packet
    }
 
@@ -1544,15 +1578,19 @@ digital_ofdm_mapper_bcv::make_packet_PRO_fwd() {
    d_modulated = false;
 }
 
-/* updates (increases) the credit for (flowId, prevHopId) for all nextHopId entries */
+/* updates (increases) the credit for (flowId, prevHopId) for all nextHopId entries 
+   works both for PRO and CF 
+   for PRO - the prevId is prevHopId
+*/
 inline void
-digital_ofdm_mapper_bcv::updateCredit(FlowInfo *fInfo, NodeId prevHopId) {
- 
+digital_ofdm_mapper_bcv::updateCredit(FlowInfo *fInfo, unsigned char prevId) {
+
+   assert(d_proto == PRO); 
    // get the weight //
    CreditWInfo wInfo;
    for(int i = 0; i < d_creditWInfoVector.size(); i++) {
        wInfo = d_creditWInfoVector[i];
-       if(wInfo.flowId == fInfo->flowId && wInfo.prevHopId == prevHopId) 
+       if(wInfo.flowId == fInfo->flowId && wInfo.prevHopId == prevId) 
 	  break;	  
    }
 
@@ -1567,8 +1605,8 @@ digital_ofdm_mapper_bcv::updateCredit(FlowInfo *fInfo, NodeId prevHopId) {
    float credit = fit->second;
    credit += (wInfo.weight*red_val);
 
-   printf("updateCredit: flow: %c, prevHop: %c, old_credit: %f, new_credit: %f\n", 
-			fInfo->flowId, prevHopId, fit->second, credit); fflush(stdout);
+   printf("updateCredit: flow: %c, prevId: %c, old_credit: %f, new_credit: %f\n", 
+			fInfo->flowId, prevId, fit->second, credit); fflush(stdout);
 
    // enqueue the pkt placeholders //
    while(credit >= 1.0) {
@@ -1681,6 +1719,500 @@ digital_ofdm_mapper_bcv::updateFwdQ_PRO(FlowId flowId, bool update) {
       }
       return;
    }
-
    d_flow_q.push_back(flowId);
+}
+
+/* ---------------------------------------------------- CF -----------------------------------------
+   -------------------------------------------------------------------------------------------------
+*/
+/* check the credit, if credit >= 1.0, then send a scheduler request. 
+   Get the scheduler reply, then again quickly check if any credit updates arrived
+   in the meantime. Ensure some credit>=1.0, and do the transmission. If
+   the credit<1.0 in the 2nd phase, then send a scheduler complete message.
+*/
+inline int
+digital_ofdm_mapper_bcv::work_forwarder_CF(int noutput_items,
+                              gr_vector_const_void_star &input_items,
+                              gr_vector_void_star &output_items) {
+   if(d_modulated) {
+      bool request_sent = false;
+      SchedulerMsg reply;
+      while(1) {
+         bool tx_ok = check_credit_CF(true);           // blocking!
+         if(!tx_ok) continue;
+
+         if(d_tdma) {
+            if(!request_sent)
+               send_scheduler_msg(REQUEST_INIT_MSG);
+            request_sent = true;
+
+            while(!check_scheduler_reply(reply)) {	// also set the d_lead_sender flag
+               sleep(0.65);
+            }
+
+            tx_ok = check_credit_CF(false);            // non-blocking!
+            if(!tx_ok) {
+               send_scheduler_msg(REQUEST_ABORT_MSG);	// abort to the scheduler
+	       if(reply.lead_sender == d_id)
+	          send_trigger_abort_CF(reply);		// abort to the slaves
+               request_sent = false;
+               continue;				// slightly inefficient: only the lead can abort the trigger
+            }
+         }
+	
+	 if(reply.lead_sender == d_id) {
+            make_time_tag(d_out_pkt_time, false);           // do not enforce 'd_out_pkt_time'
+            send_trigger_CF(reply);
+         }
+	 else {
+	    TriggerMsg rx_trigger;
+	    get_trigger_CF(rx_trigger);			    // blocking!
+	
+	    assert(rx_trigger.lead_id == reply.lead_sender);
+	    assert(rx_trigger.flow == reply.flow);
+	    assert(rx_trigger.batch_num == reply.batch_num);
+	    if(rx_trigger.type == TRIGGER_ABORT) {
+		continue;
+	    }
+	    d_out_pkt_time = uhd::time_spec_t(rx_trigger.secs, rx_trigger.frac_secs);
+	    make_time_tag(d_out_pkt_time, true);
+	 }
+         break;
+      } // while
+   }
+
+   /* the payload is already modulated, and only the header needs to be modulated */
+   FlowInfo fInfo; 
+   prepare_packet_CF_fwd(&fInfo); 
+   return modulate_and_send(noutput_items, input_items, output_items, &fInfo);
+}
+
+/* just prepare to fwd a CF_packet */
+void
+digital_ofdm_mapper_bcv::prepare_packet_CF_fwd(FlowInfo *fInfo)
+{
+   /* get the flow that needs to be serviced */
+   assert(d_flow_q_CF.size() >= 1);
+   std::pair<FlowId, LinkId> flowLink = d_flow_q_CF.front();
+   d_flow = flowLink.first;
+   LinkId nextLinkId = flowLink.second;
+   
+   assert(d_flow >= 0);
+   fInfo = getFlowInfo(false, d_flow);
+   fInfo->nextLinkId = nextLinkId;
+   d_flow_q_CF.erase(d_flow_q_CF.begin());
+
+   printf("prepare_packet_CF_fwd -- flow: %c, nextLinkId: %c\n", d_flow, nextLinkId); fflush(stdout);
+
+   /* init other params */
+   assert(d_modulated);
+   assert(d_batch_size == 1);
+   d_num_ofdm_symbols = ceil(((float) ((fInfo->packetlen) * 8))/(d_data_carriers.size() * d_data_nbits));
+   printf("d_num_ofdm_symbols: %d, d_num_hdr_symbols: %d\n", d_num_ofdm_symbols, d_num_hdr_symbols); fflush(stdout);
+
+   makeHeader(fInfo);
+   initializeBatchParams();
+   d_pending_flag = 1;                             // start of packet flag //
+
+   initHeaderParams();
+
+   d_preambles_sent = d_ofdm_symbol_index = d_null_symbol_cnt = d_hdr_ofdm_index = 0;
+   d_pkt_num++;
+   d_modulated = false;
+}
+
+/* in the unlikely event, when 1) send scheduler request, 2) get the reply 
+   3) ensure credit >= 1.0, and the credit fails, and I happen to be the lead sender, 
+   then 4) send the abort trigger on others who might be waiting on me! */
+inline void
+digital_ofdm_mapper_bcv::send_trigger_abort_CF(SchedulerMsg reply) {
+   TriggerMsg trigger;
+   trigger.lead_id = d_id;
+   trigger.flow = reply.flow;
+   trigger.batch_num = reply.batch_num;
+   trigger.type = TRIGGER_ABORT;
+
+   short num_tx = trigger.num_tx;
+   assert(num_tx < MAX_SENDERS);
+
+   for(int i = 0; i < num_tx; i++)
+      trigger.senders[i] = reply.senders[i];
+
+   int buf_size = sizeof(TriggerMsg);
+   char *buf = (char*) malloc(buf_size);
+   memcpy(buf, &trigger, buf_size);
+
+   assert(send(d_trigger_sock, buf, buf_size, 0) >= 0);
+   free(buf);
+}
+
+/* since anyone can be a triggerer, every node in a composite link needs a broadcast 
+   socket to communicate with others. The lead-sender does the trigger broadcast, 
+   while all others will wait on this broadcast
+*/
+inline void
+digital_ofdm_mapper_bcv::open_trigger_sock_CF() {
+   int on = 1;
+   struct sockaddr_in sin;
+
+   if((d_trigger_sock = socket(PF_INET, SOCK_DGRAM, 0)) < 0) {
+      perror("socket");
+      exit(1);
+   }
+
+   if(setsockopt(d_trigger_sock, SOL_SOCKET, SO_BROADCAST, &on, sizeof(on)) < 0) {
+      perror("setsockopt");
+      exit(1);
+   }
+
+   sin.sin_family = PF_INET;
+   sin.sin_addr.s_addr = INADDR_BROADCAST;
+   sin.sin_port = htons(5555);
+   if(bind(d_trigger_sock, (struct sockaddr *)&sin, sizeof(sin)) < 0) {
+      perror("bind");
+      exit(1);
+   } 
+}
+
+/* trigger broadcast to everyone listening */
+inline void
+digital_ofdm_mapper_bcv::send_trigger_CF(SchedulerMsg reply) {
+   TriggerMsg trigger;
+   trigger.lead_id = d_id;
+   trigger.num_tx = reply.num_tx;
+   trigger.flow = reply.flow;
+   trigger.batch_num = reply.batch_num;
+   trigger.secs = d_out_pkt_time.get_full_secs();
+   trigger.frac_secs = d_out_pkt_time.get_frac_secs();
+   trigger.type = TRIGGER_START;
+
+   short num_tx = trigger.num_tx;
+   assert(num_tx < MAX_SENDERS);
+ 
+   for(int i = 0; i < num_tx; i++) 
+      trigger.senders[i] = reply.senders[i];
+   
+   int buf_size = sizeof(TriggerMsg);
+   char *buf = (char*) malloc(buf_size);
+   memcpy(buf, &trigger, buf_size);
+
+   assert(send(d_trigger_sock, buf, buf_size, 0) >= 0);
+   free(buf);
+}
+
+/* block waiting for the trigger from the lead sender */
+inline void
+digital_ofdm_mapper_bcv::get_trigger_CF(TriggerMsg& trigger) {
+   printf("get_trigger_CF\n"); fflush(stdout);
+   uhd::time_spec_t out_time;
+   int buf_size = sizeof(TriggerMsg);
+   char *eth_buf = (char*) malloc(buf_size);
+
+   bool done = false;
+   while(!done) {  
+      int nbytes = recv(d_trigger_sock, eth_buf, buf_size, MSG_PEEK);
+      if(nbytes > 0) {
+         int offset = 0;
+         while(1) {
+            nbytes = recv(d_trigger_sock, eth_buf+offset, buf_size-offset, 0);
+            if(nbytes > 0) offset += nbytes;
+            if(offset == buf_size) {
+	       done = true;
+	       memcpy(&trigger, eth_buf, buf_size);
+               break;
+            }
+         }
+      }
+   }
+   printf("Trigger received for from lead: %c, batch: %d\n", trigger.lead_id, trigger.batch_num); fflush(stdout);
+   free(eth_buf);
+}
+
+/* check the queue if any more packets received from the sink - 
+   - if yes, then update the credit 
+   - update the fwd_Q if required 
+*/
+inline bool
+digital_ofdm_mapper_bcv::check_credit_CF(bool blocking) {
+
+   printf("check_credit_CF, blocking :%d\n", blocking); fflush(stdout);
+   gr_message_sptr msg;
+
+   while(1) {
+      if(blocking)
+	 msg = d_msgq->delete_head();
+      else
+	 msg = d_msgq->delete_head_nowait();
+
+      if(msg != 0) {
+         MULTIHOP_HDR_TYPE hdr = msg->header();
+
+	 unsigned short batchId = hdr.batch_number;
+	 FlowId flowId = ((int) hdr.flow_id) + '0';
+	 LinkId prevLinkId = hdr.link_id;
+	 FlowInfo *fInfo = getFlowInfo(false, flowId);
+	 assert(fInfo != NULL);
+
+	 if((batchId < fInfo->active_batch) && (fInfo->active_batch != -1)) {
+            // stale batch - complete ignore //
+            printf("Stale batch, batchId: %d, active_batch: %d\n", batchId, fInfo->active_batch); fflush(stdout);
+            msg.reset();
+            return false;
+         } 
+         else if((batchId > fInfo->active_batch) || (fInfo->active_batch == -1)) {
+            // new batch - reset encoder, credit, flow_Q, batch details, etc //
+            printf("Jumping to batch, batchId: %d, active_batch: %d\n", batchId, fInfo->active_batch);
+	    resetCredit_CF(fInfo);
+	    fInfo->active_batch = batchId;
+	    fInfo->last_batch_acked = batchId-1;
+	    fInfo->prevLinkId = prevLinkId;
+	    fInfo->packetlen = hdr.packetlen;
+	 }
+
+	 printf("flow: %c, batch: %d, prevLink: %c, active_batch: %d\n", flowId, batchId, prevLinkId, fInfo->active_batch);
+	 fflush(stdout);
+
+	 // now update the credit //
+	 updateCredit_CF(fInfo);
+	 processPacket_CF(msg, fInfo);
+	 msg.reset();
+      }
+
+      if(d_msgq->count() == 0)
+	 break;
+   }
+
+#if 0
+   if(blocking)
+      msg = d_msgq->delete_head();
+   else
+      msg = d_msgq->delete_head_nowait();
+
+   assert(d_msgq->count() == 0);
+
+   if(msg != 0) {
+      MULTIHOP_HDR_TYPE hdr = msg->header();
+
+      unsigned short batchId = hdr.batch_number;
+      FlowId flowId = ((int) hdr.flow_id) + '0';
+      Link prevLinkId = hdr.link_id;
+      FlowInfo *fInfo = getFlowInfo(false, flowId);
+      assert(fInfo != NULL);
+
+      if((batchId < fInfo->active_batch) && (fInfo->active_batch != -1)) {
+         // stale batch - complete ignore //
+         printf("Stale batch, batchId: %d, active_batch: %d\n", batchId, fInfo->active_batch); fflush(stdout);
+         msg.reset();
+         return false;
+      } else if((batchId > fInfo->active_batch) || (fInfo->active_batch == -1)) {
+         // new batch - reset encoder, credit, flow_Q, batch details, etc //
+         printf("Jumping to batch, batchId: %d, active_batch: %d\n", batchId, fInfo->active_batch);
+	 resetCredit_CF(fInfo);
+         fInfo->active_batch = batchId;
+         fInfo->last_batch_acked = batchId-1;
+	 fInfo->prevLinkId = prevLinkId;
+      }
+
+      printf("flow: %c, batch: %d, prevLink: %c, active_batch: %d\n", flowId, batchId, prevLinkId, fInfo->active_batch);
+      fflush(stdout);
+
+        // now update the credit //
+      updateCredit_CF(fInfo);
+      processPacket_CF(msg, fInfo);
+      msg.reset();
+   }
+#endif
+
+   return (d_flow_q_CF.size() > 0);
+}
+
+/* every incoming packet from the queue is processed here. The packets for the same batch 
+   are combined to do either (i) mrc or (ii) equal gain combining and only the resulting 
+   complex packet is transmitted when the credit >= 1.0. This ensures that the latest combined 
+   packet is the one that is transmitted */
+void
+digital_ofdm_mapper_bcv::processPacket_CF(gr_message_sptr msg, FlowInfo *fInfo) {
+   printf("processPacket_CF, batch: %d, prevLinkId: %c\n", fInfo->active_batch, fInfo->prevLinkId);
+
+   gr_complex *symbols = (gr_complex*) malloc(msg->length());
+   memcpy(symbols, msg->msg(), msg->length());
+  
+   FlowPktVector::iterator fit = d_flowPktVector.find(fInfo->flowId);
+   assert(fit != d_flowPktVector.end());
+   PktSymbolsVector *pv = fit->second;
+   pv->push_back(symbols);
+
+   /* MRC or Equal-Gain-Combinining will be done when you have to send the packet */
+}
+
+int
+digital_ofdm_mapper_bcv::work_CF(int noutput_items,
+                              gr_vector_const_void_star &input_items,
+                              gr_vector_void_star &output_items) {
+  FlowInfo *flowInfo = getFlowInfo(false, d_flow);
+
+  /* branch out completely if forwarder */
+  if(!d_source) {
+     return work_forwarder_CF(noutput_items, input_items, output_items);
+  }
+
+  if(d_modulated && flowInfo->pkts_fwded) {
+     check_for_ack(flowInfo);                                   // non-blocking //
+  }
+
+  if(d_modulated) {
+     make_packet_SPP(flowInfo);                              // blocking if no msg to send //
+
+     print_msg(d_msg);
+     if(d_tdma) {
+        send_scheduler_msg(REQUEST_INIT_MSG);
+	SchedulerMsg reply;
+        while(!check_scheduler_reply(reply)) {
+           sleep(0.65);
+        }
+     }
+     make_time_tag(uhd::time_spec_t(0, 0), false);
+  }
+
+  return modulate_and_send(noutput_items, input_items, output_items, flowInfo);
+}
+
+/* does the actual mrc/equal gain combining of all the versions of this packet to 
+   get a single packet */
+void
+digital_ofdm_mapper_bcv::copyOFDMSymbolData_CF(gr_complex *out) {
+  long offset = d_ofdm_symbol_index*d_occupied_carriers;
+  FlowPktVector::iterator fit = d_flowPktVector.find(d_flow);
+  assert(fit != d_flowPktVector.end());
+
+  float eq_factor = 1/((float) d_flowPktVector.size());
+
+  PktSymbolsVector *pv = fit->second;
+  PktSymbolsVector::iterator pit = pv->begin();
+  while(pit != pv->begin()) {
+     gr_complex *symbols = *pit;
+     for(int i = 0; i < d_occupied_carriers; i++) {
+         out[i] += (eq_factor*symbols[offset+i]);
+     }
+     pit++;
+  }
+
+  d_msg_offset += (d_occupied_carriers);
+
+  if(d_msg_offset == d_num_ofdm_symbols*d_occupied_carriers)
+     d_send_null = true;
+}
+
+inline void
+digital_ofdm_mapper_bcv::resetCredit_CF(FlowInfo *fInfo) {
+   if(fInfo->active_batch == -1)
+      return;
+
+   printf("resetCredit_CF, flow: %c\n", fInfo->flowId); fflush(stdout);
+   CreditInfo_CF cInfo;
+   cInfo.flowId = fInfo->flowId;
+   updateFwdQ_CF(&cInfo, false);                        // remove all entries of this flow from flow_Q //
+
+   /* remove all the packets for this batch from the flow */
+   FlowPktVector::iterator fit = d_flowPktVector.find(fInfo->flowId);
+   assert(fit != d_flowPktVector.end());
+   PktSymbolsVector *pv = fit->second;
+   PktSymbolsVector::iterator pit = pv->begin();
+   while(pit != pv->end()) {
+      gr_complex *symbols = *pit;
+      free(symbols);
+      pit++;
+   }
+   pv->clear();
+}
+
+/* updates (increases) the credit for (flowId, prevLinkId) for all nextLinkId entries 
+   CF only!
+*/
+inline void
+digital_ofdm_mapper_bcv::updateCredit_CF(FlowInfo *fInfo) {
+
+   assert(d_proto == CF);
+  
+   CreditInfoVector_CF::iterator it = d_creditInfoVector_CF.begin();
+   while(it != d_creditInfoVector_CF.end()) {
+      CreditInfo_CF *cInfo = *it;
+      if(cInfo->flowId == fInfo->flowId && cInfo->prevLinkId == fInfo->prevLinkId) {
+	 cInfo->curr_credit += cInfo->delta_credit;
+	 printf("updateCredit_CF: flow: %c, prevLinkId: %c, new_credit: %f\n",
+                        fInfo->flowId, fInfo->prevLinkId, cInfo->curr_credit); fflush(stdout);
+	 while(cInfo->curr_credit >= 1.0) {
+	    updateFwdQ_CF(cInfo, true);
+	    cInfo->curr_credit -= 1.0;
+	 }
+      }
+      it++;
+   }
+}
+
+/* this Q contains the flows for which credit >= 1.0 (time order is maintained) 
+   1. update - add the flow if its credit now is >= 1.0
+   2. delete (!update) - if the flow was ACKed before it could be sent out
+*/
+inline void
+digital_ofdm_mapper_bcv::updateFwdQ_CF(CreditInfo_CF *cInfo, bool update) {
+   bool _delete = !update;
+
+   /* if delete - then remove all the flowId entries from the queue (irr. of the nextLinkId) */
+   if(_delete) {
+      vector<std::pair<FlowId, LinkId> >::iterator fit = d_flow_q_CF.begin();
+      while(fit != d_flow_q_CF.end()) {
+	 std::pair<FlowId, LinkId> pf = *fit;
+	 if(pf.first == cInfo->flowId)
+            d_flow_q_CF.erase(fit);
+            fit = d_flow_q_CF.begin();
+            continue;
+         fit++;
+      }
+      return;
+   }
+
+   /* update - then insert it */
+   d_flow_q_CF.push_back(std::pair<FlowId, LinkId> (cInfo->flowId, cInfo->nextLinkId));
+}
+
+/* one single file that contains both the weight and red. values */
+inline void
+digital_ofdm_mapper_bcv::populateCreditInfo_CF() {
+   printf("populateCreditInfo_CF\n"); fflush(stdout);
+   // flow node prevLink nextLink weight redundancy //
+   FILE *fl = fopen ( "credit_CF.txt" , "r+" );
+   if (fl==NULL) {
+        fprintf (stderr, "File error\n");
+        assert(false);
+   }
+
+   char line[128];
+   const char *delim = " ";
+   while ( fgets ( line, sizeof(line), fl ) != NULL ) {
+        char *strtok_res = strtok(line, delim);
+        vector<char*> token;
+        while (strtok_res != NULL) {
+           token.push_back(strtok_res);
+           strtok_res = strtok (NULL, delim);
+        }
+
+        FlowId flowId = atoi(token[0])+'0';
+        NodeId nodeId = atoi(token[1])+'0';
+        if(nodeId == d_id) {
+	   CreditInfo_CF *cInfo = (CreditInfo_CF*) malloc(sizeof(CreditInfo_CF));
+           cInfo->flowId = flowId;
+           cInfo->prevLinkId = atoi(token[2])+'0';
+	   cInfo->nextLinkId = atoi(token[3])+'0';
+	   float wt = atof(token[4]);
+	   float red = atof(token[5]);
+	   cInfo->delta_credit = wt*red;
+	   cInfo->curr_credit = 0.0;
+
+           printf("flow: %c, prevLink: %c, nextLink: %c, wt: %f, red: %f, delta_credit: %f\n", 
+		   flowId, cInfo->prevLinkId, cInfo->nextLinkId, wt, red, cInfo->delta_credit);
+           d_creditInfoVector_CF.push_back(cInfo);
+        }
+   }
+   fclose (fl);
 }

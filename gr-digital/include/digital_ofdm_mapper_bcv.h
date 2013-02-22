@@ -484,7 +484,7 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
 
   uhd::usrp::multi_usrp::sptr d_usrp;
   uhd::time_spec_t d_last_pkt_time, d_out_pkt_time;
-  void make_time_tag(); 
+  void make_time_tag(uhd::time_spec_t, bool); 
   int d_data_ofdm_index, d_hdr_ofdm_index; 
 
   // util functions //
@@ -519,7 +519,7 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
   int d_tdma;
   void create_scheduler_sock();
   void send_scheduler_msg(int);
-  bool check_scheduler_reply();
+  bool check_scheduler_reply(SchedulerMsg&);
   SockId d_scheduler_sock;
   int d_request_id;
 
@@ -554,10 +554,34 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
 
   bool check_credit_PRO(bool blocking);
   void resetCredit(FlowInfo*);
-  void updateCredit(FlowInfo *fInfo, NodeId prevHopId);
+  void updateCredit(FlowInfo *fInfo, unsigned char prevId);
   void populateCreditInfo();
   void updateFwdQ_PRO(FlowId flowId, bool update);
   vector<FlowId> d_flow_q;				// maintains the order in which flows need to be serviced //
+
+
+  /* for CF */
+  int work_CF(int, gr_vector_const_void_star&, gr_vector_void_star&);
+  int work_forwarder_CF(int, gr_vector_const_void_star&, gr_vector_void_star&);
+  void prepare_packet_CF_fwd(FlowInfo*);
+  void copyOFDMSymbolData_CF(gr_complex*);
+  void processPacket_CF(gr_message_sptr, FlowInfo*);
+
+  void populateCreditInfo_CF();
+  bool check_credit_CF(bool);
+  void updateCredit_CF(FlowInfo*);
+  void resetCredit_CF(FlowInfo*);
+  void updateFwdQ_CF(CreditInfo_CF *cInfo, bool update);
+
+  void open_trigger_sock_CF();
+  void send_trigger_abort_CF(SchedulerMsg);
+  void send_trigger_CF(SchedulerMsg);
+  void get_trigger_CF(TriggerMsg&);
+  SockId d_trigger_sock;
+
+  FlowPktVector d_flowPktVector;
+  CreditInfoVector_CF d_creditInfoVector_CF;
+  vector<std::pair<FlowId, LinkId> > d_flow_q_CF;
 };
 
 #endif
