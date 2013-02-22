@@ -1621,7 +1621,7 @@ digital_ofdm_frame_sink::populateCompositeLinkInfo_CF() {
    // link-id   #of-src     src1   src2   src3    #of-dst   dst1   dst2    dst3    //
    printf("populateCompositeLinkInfo_CF\n"); fflush(stdout);
 
-   FILE *fl = fopen ( "compositeLink_info.txt" , "r+" );
+   FILE *fl = fopen ( "compositeLink.txt" , "r+" );
    if (fl==NULL) {
         fprintf (stderr, "File error\n");
         exit (1);
@@ -1665,6 +1665,19 @@ digital_ofdm_frame_sink::populateCompositeLinkInfo_CF() {
         printf("\n");
    }
    fclose (fl);
+}
+
+CompositeLink*
+digital_ofdm_frame_sink::getCompositeLink(LinkId id)
+{
+   CompositeLinkVector::iterator it = d_compositeLinkVector.begin();
+   while(it != d_compositeLinkVector.end()) {
+        CompositeLink *cLink = *it;
+        if(cLink->linkId == id)
+            return cLink;
+        it++;
+   }
+   return NULL;
 }
 
 bool

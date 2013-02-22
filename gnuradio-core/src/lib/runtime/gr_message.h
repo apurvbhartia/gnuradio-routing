@@ -101,7 +101,7 @@ typedef struct multihop_hdr_type {
   // 4
   unsigned int hdr_crc;
 
-  // 4
+  // 2
   unsigned char pad[PADDING_SIZE];                 // to ensure size % (occupied_carriers-dc_carriers) = 0
 
 } MULTIHOP_HDR_TYPE;

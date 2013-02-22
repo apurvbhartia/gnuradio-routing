@@ -198,11 +198,11 @@ class ofdm_mod(gr.hier_block2):
         """
         normal.add_option("-m", "--modulation", type="string", default="bpsk",
                           help="set modulation type (bpsk, qpsk, 8psk, qam{16,64}) [default=%default]")
-        expert.add_option("", "--fft-length", type="intx", default=512,
+        expert.add_option("", "--fft-length", type="intx", default=96,
                           help="set the number of FFT bins [default=%default]")
-        expert.add_option("", "--occupied-tones", type="intx", default=200,
+        expert.add_option("", "--occupied-tones", type="intx", default=80,
                           help="set the number of occupied FFT bins [default=%default]")
-        expert.add_option("", "--cp-length", type="intx", default=128,
+        expert.add_option("", "--cp-length", type="intx", default=24,
                           help="set the number of bits in the cyclic prefix [default=%default]")
 
 	# apurv++ adding options #
@@ -390,11 +390,11 @@ class ofdm_demod(gr.hier_block2):
         """
         normal.add_option("-m", "--modulation", type="string", default="bpsk",
                           help="set modulation type (bpsk or qpsk) [default=%default]")
-        expert.add_option("", "--fft-length", type="intx", default=512,
+        expert.add_option("", "--fft-length", type="intx", default=96,
                           help="set the number of FFT bins [default=%default]")
-        expert.add_option("", "--occupied-tones", type="intx", default=200,
+        expert.add_option("", "--occupied-tones", type="intx", default=80,
                           help="set the number of occupied FFT bins [default=%default]")
-        expert.add_option("", "--cp-length", type="intx", default=128,
+        expert.add_option("", "--cp-length", type="intx", default=24,
                           help="set the number of bits in the cyclic prefix [default=%default]")
 	expert.add_option("", "--snr", type="float", default=30.0,
                          help="SNR estimate [default=%default]")
