@@ -518,7 +518,7 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
   /* scheduling */
   int d_tdma;
   void create_scheduler_sock();
-  void send_scheduler_msg(int);
+  void send_scheduler_msg(int, FlowId);
   bool check_scheduler_reply(SchedulerMsg&);
   SockId d_scheduler_sock;
   int d_request_id;
@@ -552,7 +552,7 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
   CreditRInfoMap d_creditRInfoMap;				// redundancy	(credit_r.txt)
   FlowCreditMap d_flowCreditMap;				// flow credits are updated
 
-  bool check_credit_PRO(bool blocking);
+  bool check_credit_PRO(bool blocking, FlowId&);
   void resetCredit(FlowInfo*);
   void updateCredit(FlowInfo *fInfo, unsigned char prevId);
   void populateCreditInfo();
@@ -563,12 +563,12 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
   /* for CF */
   int work_CF(int, gr_vector_const_void_star&, gr_vector_void_star&);
   int work_forwarder_CF(int, gr_vector_const_void_star&, gr_vector_void_star&);
-  void prepare_packet_CF_fwd(FlowInfo*);
+  void prepare_packet_CF_fwd();
   void copyOFDMSymbolData_CF(gr_complex*);
   void processPacket_CF(gr_message_sptr, FlowInfo*);
 
   void populateCreditInfo_CF();
-  bool check_credit_CF(bool);
+  bool check_credit_CF(bool, FlowId&);
   void updateCredit_CF(FlowInfo*);
   void resetCredit_CF(FlowInfo*);
   void updateFwdQ_CF(CreditInfo_CF *cInfo, bool update);

@@ -154,7 +154,7 @@ digital_ofdm_frame_sink::extract_header()
 
   d_pkt_num = d_header.pkt_num;
   d_prevLinkId = d_header.link_id;
-  printf("\tpkt_num: %d \t\t\t\t batch_num: %d \t\t\t\t len: %d src: %d prev-link: %d\n", d_header.pkt_num, d_header.batch_number, d_packetlen, d_header.src_id, d_prevLinkId); fflush(stdout);
+  printf("\tpkt_num: %d \t\t\t\t batch_num: %d \t\t\t\t len: %d src: %d prev-link: %c\n", d_header.pkt_num, d_header.batch_number, d_packetlen, d_header.src_id, d_prevLinkId); fflush(stdout);
 
   if (VERBOSE || 1)
     fprintf(stderr, " hdr details: (src: %d), (rx: %d), (batch_num: %d), (d_nsenders: %d), (d_packetlen: %d), (d_pkt_type: %d), (prev_hop: %d)\n",
@@ -692,40 +692,36 @@ digital_ofdm_frame_sink::work (int noutput_items,
 
     if(d_curr_ofdm_symbol_index == d_num_ofdm_symbols) {		// last ofdm symbol in pkt
        flowInfo = getFlowInfo(false, d_flow);	
-       if(d_proto == CF && 0) {
+       // SPP, PRO //
+       std::string decoded_msg;
+       if(d_proto == SPP) {
+          bool tx_ack = demodulate_packet(decoded_msg, flowInfo);
+	  send_ack(tx_ack, flowInfo);					// per-hop ack
+	  if(tx_ack && d_fwd) {
+	     // update credit //
+	     makePacket_SPP(decoded_msg, flowInfo);
+	  }
        }
-       else {
-	  // SPP, PRO //
-          std::string decoded_msg;
-	  if(d_proto == SPP) {
-	     bool tx_ack = demodulate_packet(decoded_msg, flowInfo);
-	     send_ack(tx_ack, flowInfo);					// per-hop ack
-	     if(tx_ack && d_fwd) {
-		// update credit //
-	        makePacket_SPP(decoded_msg, flowInfo);
-	     }
-          }
-          else if(d_proto == PRO) {
-	     bool tx_ack = demodulate_packet(decoded_msg, flowInfo);
-	     if(d_dst) {
-	        bool e2e_ack_pro = decodePacket(decoded_msg, flowInfo);
-	        if(e2e_ack_pro) 
-		   send_ack(true, flowInfo);
-	     } else {
-	        assert(d_fwd);
-	        makePacket_PRO(decoded_msg, flowInfo);
-	     }
-          }
-	  else if(d_proto == CF) {
-	     if(d_dst) {
-		bool tx_ack = demodulate_packet(decoded_msg, flowInfo);	
-		send_ack(tx_ack, flowInfo);	
-	     }
-	     else {
-		assert(d_fwd);
-	        makePacket_CF(flowInfo); 
-	     }
- 	  }
+       else if(d_proto == PRO) {
+          bool tx_ack = demodulate_packet(decoded_msg, flowInfo);
+	  if(d_dst) {
+	     bool e2e_ack_pro = decodePacket(decoded_msg, flowInfo);
+	     if(e2e_ack_pro) 
+	        send_ack(true, flowInfo);
+	  } else {
+	     assert(d_fwd);
+	     makePacket_PRO(decoded_msg, flowInfo);
+	  }
+       }
+       else if(d_proto == CF) {
+	  if(d_dst) {
+	     bool tx_ack = demodulate_packet(decoded_msg, flowInfo);	
+	     send_ack(tx_ack, flowInfo);	
+	  }
+	  else {
+	     assert(d_fwd);
+	     makePacket_CF(flowInfo); 
+	  }
        }
 
        resetPktInfo(d_pktInfo);
@@ -1016,7 +1012,7 @@ digital_ofdm_frame_sink::makeHeader(MULTIHOP_HDR_TYPE &header, unsigned char *he
    header.pkt_type = DATA_TYPE;
    header.pkt_num = d_pkt_num;
 
-   header.link_id = 0;					// in case of CF, this needs to be 'set' based on the credit
+   header.link_id = '0';					// in case of CF, this needs to be 'set' based on the credit
    flowInfo->pkts_fwded++;
 
    unsigned char header_data_bytes[HEADERDATALEN];
@@ -1058,7 +1054,7 @@ digital_ofdm_frame_sink::send_ack(bool ack, FlowInfo *flowInfo) {
 
   if(d_proto == SPP)
      ack_header.dst_id = flowInfo->prevHopId;				// per-hop ack for SPP
-  else if(d_proto == PRO)
+  else if(d_proto == PRO || d_proto == CF)
      ack_header.dst_id = flowInfo->src;					// e2e ack for PRO
 
   ack_header.batch_number = flowInfo->active_batch;                     // active-batch got ACKed
@@ -1642,8 +1638,8 @@ digital_ofdm_frame_sink::populateCompositeLinkInfo_CF() {
 
         CompositeLink *cLink = (CompositeLink*) malloc(sizeof(CompositeLink));
         memset(cLink, 0, sizeof(CompositeLink));
-        cLink->linkId = atoi(token_vec[0]);
-        printf("linkId: %d\n", cLink->linkId); fflush(stdout);
+        cLink->linkId = atoi(token_vec[0])+'0';
+        printf("linkId: %c\n", cLink->linkId); fflush(stdout);
 
         int num_src = atoi(token_vec[1]);
         printf("num_src: %d\n", num_src); fflush(stdout);

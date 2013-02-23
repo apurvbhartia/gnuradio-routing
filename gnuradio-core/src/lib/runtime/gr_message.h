@@ -168,10 +168,12 @@ typedef struct scheduler_msg {
 
   /* these fields used only for CF */
   short num_tx;
-  unsigned char lead_sender;
-  unsigned char flow;
+  NodeId lead_sender;
+  FlowId flow;
   unsigned int batch_num;			// even if batch_size = 1, batch_num is not pkt_num, since multiple retx might happen for same batch
-  unsigned char senders[MAX_SENDERS];
+  short proto;
+  LinkId linkId;
+  NodeId senders[MAX_SENDERS];
 } SchedulerMsg;
 
 typedef struct trigger_msg {
@@ -201,8 +203,7 @@ typedef std::map<FlowId, float> FlowCreditMap;               // current credit
 /* for CF */
 typedef struct credit {
   FlowId flowId;
-  NodeId prevLinkId;
-  LinkId nextLinkId;
+  LinkId prevLinkId, nextLinkId;
   float delta_credit;
   float curr_credit;
 } CreditInfo_CF;

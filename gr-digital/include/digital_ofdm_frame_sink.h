@@ -491,7 +491,7 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
   //unsigned char d_flow; 
   int d_flow;
   unsigned int d_pkt_type;
-  unsigned int d_prevLinkId;
+  LinkId d_prevLinkId;
 
   gr_complex *d_in_estimates;		// will be updated only if preamble is not detected in between a pkt! //
 
@@ -505,7 +505,7 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
   PktInfo *d_pktInfo;			     // current pkt being serviced 
   gr_msg_queue_sptr  d_out_queue;            // contains modulated packets to be forwarded/ACKs
 
-  FlowInfo* getFlowInfo(bool create, unsigned char flowId);
+  FlowInfo* getFlowInfo(bool create, FlowId flowId);
   void populateFlowInfo();
   void populateRouteInfo();
   void resetPktInfo(PktInfo *pktInfo);
