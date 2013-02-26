@@ -75,6 +75,15 @@ gr_make_io_signature4(int min_streams, int max_streams,
 		      int sizeof_stream_item4
                       );
 
+gr_io_signature_sptr
+gr_make_io_signature5(int min_streams, int max_streams,
+                      int sizeof_stream_item1,
+                      int sizeof_stream_item2,
+                      int sizeof_stream_item3,
+                      int sizeof_stream_item4,
+                      int sizeof_stream_item5
+                      );
+
 /*!
  * \brief Create an i/o signature
  *

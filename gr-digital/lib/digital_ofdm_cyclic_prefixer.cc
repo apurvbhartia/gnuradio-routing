@@ -38,7 +38,7 @@ digital_ofdm_cyclic_prefixer::digital_ofdm_cyclic_prefixer (size_t input_size,
 							    size_t output_size)
   : gr_sync_interpolator ("ofdm_cyclic_prefixer",
 			  //gr_make_io_signature (1, 1, input_size*sizeof(gr_complex)),
-			  gr_make_io_signature2 (1, 2, input_size*sizeof(gr_complex), sizeof(short)),		// apurv++ burst tagger
+			  gr_make_io_signature3 (1, 3, input_size*sizeof(gr_complex), sizeof(short), sizeof(short)),		// apurv++ burst tagger
 			  //gr_make_io_signature (1, 1, sizeof(gr_complex)),
 			  gr_make_io_signature2 (1, 2, sizeof(gr_complex), sizeof(short)),			// apurv++ burst tagger
 			  output_size), 
@@ -70,6 +70,22 @@ digital_ofdm_cyclic_prefixer::work (int noutput_items,
       out_trigger = (short*) output_items[1];
   }
   /* apurv end */
+
+#if 1
+  /* entire CDD stuff */
+  short *cdd = NULL;
+  if(input_items.size() >= 3)
+     cdd = (short*) input_items[2];
+
+  if(cdd[0] > 0) {
+     gr_complex *temp_in = (gr_complex*) malloc(sizeof(gr_complex)*d_input_size);
+     memcpy(temp_in, in, sizeof(gr_complex)*d_input_size);
+
+     memcpy(&in[cdd[0]], temp_in, sizeof(gr_complex)*(d_input_size-cdd[0]));
+     memcpy(in, &temp_in[d_input_size-cdd[0]], sizeof(gr_complex)*cdd[0]);
+     free(temp_in);
+  }
+#endif
  
   size_t cp_size = d_output_size - d_input_size;
   unsigned int i=0, j=0;

@@ -40,7 +40,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <stdlib.h>
-
+#include <bitset>
 #include <digital_crc32.h>
 #include <gr_uhd_usrp_source.h>
 
@@ -98,9 +98,9 @@ digital_ofdm_frame_sink::enter_have_header() {
   d_state = STATE_HAVE_HEADER;
   d_curr_ofdm_symbol_index = 0;
   d_num_ofdm_symbols = ceil(((float) (d_packetlen * 8))/(d_data_carriers.size() * d_data_nbits));
-  assert(d_num_ofdm_symbols < MAX_OFDM_SYMBOLS);                                // FIXME - arbitrary '70'.. 
-  printf("d_num_ofdm_symbols: %d, actual sc size: %d, d_data_nbits: %d\n", d_num_ofdm_symbols, d_data_carriers.size(), d_data_nbits);
+  printf("d_num_ofdm_symbols: %d, actual sc size: %d, d_data_nbits: %d, d_packetlen: %d\n", d_num_ofdm_symbols, d_data_carriers.size(), d_data_nbits, d_packetlen);
   fflush(stdout);
+   assert(d_num_ofdm_symbols < MAX_OFDM_SYMBOLS);
 
   d_pktInfo = createPktInfo();
   d_pktInfo->symbols = (gr_complex*) malloc(sizeof(gr_complex) * d_num_ofdm_symbols * d_occupied_carriers);
@@ -394,8 +394,8 @@ digital_ofdm_frame_sink::digital_ofdm_frame_sink(const std::vector<gr_complex> &
     d_fft_length(fft_length),
     d_out_queue(fwd_queue),
     d_expected_size(exp_size),
-    d_fec_n(fec_n),
-    d_fec_k(fec_k),
+    fec_N(fec_n),
+    fec_K(fec_k),
     d_preamble(preamble),
     d_preamble_cnt(0),
     d_proto(proto)
@@ -443,6 +443,9 @@ digital_ofdm_frame_sink::digital_ofdm_frame_sink(const std::vector<gr_complex> &
   reset_demapper();
 
   fill_all_carriers_map();   
+
+  BitInterleave bi(d_data_carriers.size(), d_data_nbits);
+  bi.fill(d_interleave_map, true);
 
   d_out_pkt_time = uhd::time_spec_t(0.0);
   d_last_pkt_time = uhd::time_spec_t(0.0);
@@ -616,15 +619,14 @@ digital_ofdm_frame_sink::work (int noutput_items,
     if(d_preamble_cnt < d_preamble.size()) {
 	if(d_preamble_cnt == d_preamble.size()-1) {
 	   /* last preamble - calculate SNR */
-	   equalizeSymbols(&in[0], d_in_estimates);
-	   calculate_snr(in);
-	}
-	else {
 	   memcpy(d_in_estimates, in_estimates, sizeof(gr_complex) * d_occupied_carriers);
 #if LOG_H
            count = ftell(d_fp_hestimates);
            count = fwrite_unlocked(in_estimates, sizeof(gr_complex), d_occupied_carriers, d_fp_hestimates);
 #endif
+
+	   equalizeSymbols(&in[0], d_in_estimates);
+	   calculate_snr(in);
 	}
 	d_preamble_cnt++;
 	break;
@@ -1135,7 +1137,6 @@ digital_ofdm_frame_sink::set_msg_timestamp(gr_message_sptr msg) {
 bool
 digital_ofdm_frame_sink::crc_check(std::string msg, std::string& decoded_str)
 {
-  int fec_n = d_fec_n, fec_k = d_fec_k;
   int exp_len = d_expected_size;
   
   int len = msg.length();
@@ -1146,7 +1147,10 @@ digital_ofdm_frame_sink::crc_check(std::string msg, std::string& decoded_str)
   /* dewhiten the msg first */
   printf("crc_check begin! len: %d\n", len); fflush(stdout);
   dewhiten(msg_data, len);
-  std::string dewhitened_msg((const char*) msg_data, len);
+
+  /* deinterleave */
+  deinterleave(msg_data, len);				// len w/ interleaving
+    
 
   /*
   for(int i = 0; i < len; i++) {
@@ -1156,15 +1160,23 @@ digital_ofdm_frame_sink::crc_check(std::string msg, std::string& decoded_str)
   */
 
   /* perform any FEC if required */
-  if(fec_n > 0 && fec_k > 0) {
-	decoded_str = digital_rx_wrapper(dewhitened_msg, fec_n, fec_k, 1, exp_len);
+  if(fec_N > 0 && fec_K > 0) {
+     int num_fec_blocks = ceil(exp_len/((float)fec_K));
+     len = exp_len + (num_fec_blocks*(fec_N-fec_K));	
+
+     printf("len: %d, fec_blocks: %d\n", len, num_fec_blocks); fflush(stdout);
+     std::string deintv_msg((const char*) msg_data, len);
+     decoded_str = digital_rx_wrapper(deintv_msg, fec_N, fec_K, 1, exp_len);
   } else {
-	decoded_str = dewhitened_msg;
+     len = exp_len;
+     printf("len: %d\n", len); fflush(stdout);
+     std::string deintv_msg((const char*) msg_data, len);
+     decoded_str = deintv_msg;
   }
 
   if(len < 4) {
-	free(msg_data);
-	return false;
+     free(msg_data);
+     return false;
   }
 
   /* now, calculate the crc based on the received msg */
@@ -1180,10 +1192,10 @@ digital_ofdm_frame_sink::crc_check(std::string msg, std::string& decoded_str)
   std::string hex_exp_crc = "";
 
   for(int i = expected_crc.size()-1; i >= 0; i--) {			// f-ing endianess!!
-        char tmp[3];
-        snprintf(tmp, sizeof(tmp), "%02x", (unsigned char) expected_crc[i]);
-	//printf("%s", test); fflush(stdout);
-	hex_exp_crc.append(tmp);
+      char tmp[3];
+      snprintf(tmp, sizeof(tmp), "%02x", (unsigned char) expected_crc[i]);
+      //printf("%s", test); fflush(stdout);
+      hex_exp_crc.append(tmp);
   }
 
   //printf("hex exp crc (%d): %s\n", sizeof(hex_exp_crc), hex_exp_crc.c_str()); fflush(stdout);
@@ -1739,6 +1751,37 @@ digital_ofdm_frame_sink::makePacket_CF(FlowInfo *fInfo) {
    d_out_queue->insert_tail(out_msg);
    out_msg.reset();
    printf("makePacket_CF end\n"); fflush(stdout);
+}
+
+inline void
+digital_ofdm_frame_sink::deinterleave(unsigned char *data, int len) {
+
+   /* convert to bits */
+   std::string orig_s;
+   for(int i = 0; i < len; i++) {
+       std::bitset<sizeof(unsigned char) * 8> s_bits(data[i]);
+       std::string tmp_string = s_bits.to_string<char,std::char_traits<char>,std::allocator<char> >();
+       orig_s.append(tmp_string);
+   }
+   int len_bits = orig_s.length();
+   printf("len_bits: %d, len: %d\n", len_bits, len); fflush(stdout);
+   assert(len_bits == len*8);
+
+   unsigned char *out = (unsigned char*) malloc(len_bits);
+   for(unsigned i = 0; i < len_bits; i += d_interleave_map.size()) {
+       for(unsigned j = 0; j < d_interleave_map.size(); ++j) {
+           out[i+d_interleave_map[j]] = (orig_s.data())[i+j];
+       }
+   }
+
+   /*convert back to data */
+   string tmp_s((const char*) out, len_bits);
+   for(int i = 0, k = 0; i < len_bits; i=i+8)
+   {
+      bitset<sizeof(unsigned char)*8> s_bits(tmp_s.substr(i, 8));
+      data[k++] = (unsigned char) s_bits.to_ulong();
+   }
+   free(out);
 }
 
 #if 0

@@ -53,7 +53,7 @@ class DIGITAL_API digital_ofdm_sampler : public gr_block
 		   unsigned int timeout);
 
  private:
-  enum state_t {STATE_NO_SIG, STATE_PREAMBLE, STATE_FRAME};
+  enum state_t {STATE_NO_SIG, STATE_SIGNAL, STATE_PREAMBLE, STATE_FRAME};
 
   state_t d_state;
   unsigned int d_timeout_max;

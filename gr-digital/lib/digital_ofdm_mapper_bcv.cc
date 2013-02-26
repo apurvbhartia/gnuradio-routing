@@ -37,6 +37,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <stdlib.h>
+#include <bitset>
 
 #include "GaloisField.h"
 #include "NetCoder.h"
@@ -51,9 +52,11 @@ digital_make_ofdm_mapper_bcv (const std::vector<gr_complex> &hdr_constellation,
 			 unsigned int id,
 			 unsigned int source,
 			 unsigned int batch_size,
-			 unsigned int dst_id)
+			 unsigned int dst_id,
+			 unsigned int fec_n, unsigned int fec_k)
 {
-  return gnuradio::get_initial_sptr(new digital_ofdm_mapper_bcv (hdr_constellation, data_constellation, preamble, msgq_limit, occupied_carriers, fft_length, tdma, proto, id, source, batch_size, dst_id));
+  return gnuradio::get_initial_sptr(new digital_ofdm_mapper_bcv (hdr_constellation, data_constellation, preamble, msgq_limit, occupied_carriers, fft_length, tdma, proto, id, source, batch_size, dst_id, 
+								 fec_n, fec_k));
 }
 
 // Consumes 1 packet and produces as many OFDM symbols of fft_length to hold the full packet
@@ -66,10 +69,11 @@ digital_ofdm_mapper_bcv::digital_ofdm_mapper_bcv (const std::vector<gr_complex> 
 					unsigned int id,
 					unsigned int source,
 					unsigned int batch_size,
-					unsigned int dst_id) 
+					unsigned int dst_id,
+					unsigned int fec_n, unsigned int fec_k) 
   : gr_sync_block ("ofdm_mapper_bcv",
 		   gr_make_io_signature (0, 0, 0),
-		   gr_make_io_signature4 (1, 4, sizeof(gr_complex)*fft_length, sizeof(short), sizeof(char), sizeof(char)*fft_length)),
+		   gr_make_io_signature5 (1, 5, sizeof(gr_complex)*fft_length, sizeof(short), sizeof(short), sizeof(char), sizeof(char)*fft_length)),
     d_hdr_constellation(hdr_constellation),
     d_data_constellation(data_constellation),
     d_msgq(gr_make_msg_queue(msgq_limit)), d_eof(false),
@@ -85,9 +89,10 @@ digital_ofdm_mapper_bcv::digital_ofdm_mapper_bcv (const std::vector<gr_complex> 
     d_dst_id(dst_id+'0'),
     d_preambles_sent(0),
     d_preamble(preamble),
-    d_flow(0),
+    d_flow('0'),
     d_tdma(tdma),
-    d_proto(proto)
+    d_proto(proto),
+    fec_N(fec_n), fec_K(fec_k)
 {
 
   srand((int) d_id);
@@ -127,6 +132,9 @@ digital_ofdm_mapper_bcv::digital_ofdm_mapper_bcv (const std::vector<gr_complex> 
   d_num_hdr_symbols = (HEADERBYTELEN*8)/d_data_carriers.size();
 
   d_time_pkt_sent = 0;
+
+  BitInterleave bi(d_data_carriers.size(), d_data_nbits);
+  bi.fill(d_interleave_map, false);
 
   populateFlowInfo();
   populateEthernetAddress();
@@ -367,7 +375,7 @@ digital_ofdm_mapper_bcv::make_packet_SPP(FlowInfo *flowInfo)
      gr_message_sptr msg = d_msgq->delete_head();         // dequeue the pkts from the queue //
      assert(msg->length() > 0);
 
-     add_crc_and_fec(msg, 0, 0);	     // creates the final d_msg
+     add_crc_and_fec(msg);	     // creates the final d_msg
      if(!d_source) { 
 	assert(d_proto == SPP);
 	d_msg->set_header(msg->header());
@@ -416,10 +424,21 @@ digital_ofdm_mapper_bcv::modulate_and_send(int noutput_items,
   burst_trigger[0] = 1;
   /* end */
 
+  /* for CDD */
+  unsigned short *cdd = NULL;
+  if(output_items.size() >= 3) {
+     cdd = (unsigned short*) output_items[2];
+     memset(cdd, 0, sizeof(short));
+  }
+  cdd[0] = 0;
+  if(!flowInfo->isLead)
+     cdd[0] = 3;
+  /* end */
+
   /* optional - for out timing signal required only for debugging */
   unsigned char *out_signal = NULL;
-  if (output_items.size() >= 3){
-    out_signal = (unsigned char*) output_items[3];
+  if (output_items.size() >= 5){
+    out_signal = (unsigned char*) output_items[4];
     memset(out_signal, 0, sizeof(char) * d_fft_length);
   }
   /* end */
@@ -434,6 +453,11 @@ digital_ofdm_mapper_bcv::modulate_and_send(int noutput_items,
       generateOFDMSymbolHeader(out); 					// send the header symbols out first //
       tx_pilot = true;
   }
+#if 0
+  else if(flowInfo->isLead && d_null_symbol_cnt < (d_preamble.size()+d_num_hdr_symbols)) {
+      d_null_symbol_cnt++;
+  }
+#endif
   else if(!d_send_null) {
 
       assert(d_pending_flag == 0);
@@ -452,13 +476,18 @@ digital_ofdm_mapper_bcv::modulate_and_send(int noutput_items,
   }
   else {
       // send a NULL symbol at the end //
+       int ii=0;
+       while(ii < d_data_carriers.size()) {   // finish filling out the symbol
+         out[d_data_carriers[ii]] = d_data_constellation[randsym()];
+         ii++;
+      }
       d_pending_flag = 2;
       flowInfo->pkts_fwded++;
       assert(d_ofdm_symbol_index == d_num_ofdm_symbols);
       d_send_null = false;
       d_modulated = true;
       flowInfo->pkts_fwded++;
-      if(d_tdma) send_scheduler_msg(REQUEST_COMPLETE_MSG, flowInfo->flowId);
+      if(d_tdma && (flowInfo->isLead)) send_scheduler_msg(REQUEST_COMPLETE_MSG, flowInfo->flowId);
       d_request_id++;
   }
 
@@ -477,8 +506,8 @@ digital_ofdm_mapper_bcv::modulate_and_send(int noutput_items,
   }
 
   char *out_flag = 0;
-  if(output_items.size() >= 3)
-    out_flag = (char *) output_items[2];
+  if(output_items.size() >= 4)
+    out_flag = (char *) output_items[3];
 
   if (out_flag)
     out_flag[0] = d_pending_flag;
@@ -778,22 +807,24 @@ digital_ofdm_mapper_bcv::makeHeader(FlowInfo *fInfo)
 	 d_header.dst_id = fInfo->dst;
 	 d_header.batch_number = fInfo->active_batch;
 	 d_header.pkt_num = d_pkt_num;
-	 d_header.prev_hop_id = d_id;
 
 	 if(d_proto == PRO) {
+	    d_header.prev_hop_id = d_id;
 	    d_header.packetlen = d_packetlen;
 	    d_header.next_hop_id = fInfo->nextHopId;		// useless field for PRO
 	    memcpy(d_header.coeffs, fInfo->coeffs, d_batch_size);
 	 }
 	 else if(d_proto == CF) {
+	    d_header.prev_hop_id = fInfo->leadId;		// useless for CF, only link matters!
 	    d_header.packetlen = fInfo->packetlen;
 	    d_header.link_id = fInfo->nextLinkId;
+            printf("(MAPPER) makeHeader batch: %d, pkt: %d, len: %d, src: %c, dst: %c, flow: %c, next_hop: %c, nextLink: %c\n",           
+                    fInfo->active_batch, d_pkt_num, fInfo->packetlen, fInfo->src, fInfo->dst, fInfo->flowId,         
+                    fInfo->nextHopId, fInfo->nextLinkId);
+            fflush(stdout);
 	 }
       }
    }
-
-   printf("makeHeader for batch: %d, pkt: %d, len: %d\n", d_header.batch_number, d_header.pkt_num, d_header.packetlen); 
-   fflush(stdout);
 
    d_last_pkt_time = d_out_pkt_time;  
 
@@ -806,7 +837,7 @@ digital_ofdm_mapper_bcv::makeHeader(FlowInfo *fInfo)
    memcpy(d_header_bytes, header_data_bytes, HEADERDATALEN);				// copy header data
    memcpy(d_header_bytes+HEADERDATALEN, &calc_crc, sizeof(int));		// copy header crc
 
-   printf("len: %d, crc: %u\n", d_packetlen, calc_crc);
+   printf("len: %d, crc: %u\n", d_header.packetlen, calc_crc);
 
    //debugHeader();  
    whiten(d_header_bytes, HEADERBYTELEN);
@@ -836,7 +867,7 @@ digital_ofdm_mapper_bcv::whiten(unsigned char *bytes, unsigned int len)
 /* uses 'msg' to create a 'd_msg' with appropriate length. 'msg' can be freed after 
    this call */
 void
-digital_ofdm_mapper_bcv::add_crc_and_fec(gr_message_sptr msg, int fec_N, int fec_K) {
+digital_ofdm_mapper_bcv::add_crc_and_fec(gr_message_sptr msg) {
    printf("add_crc_and_fec, fec_N: %d, fec_K: %d\n", fec_N, fec_K); fflush(stdout);
    unsigned int calc_crc = 0;
    int len = msg->length();
@@ -863,18 +894,38 @@ digital_ofdm_mapper_bcv::add_crc_and_fec(gr_message_sptr msg, int fec_N, int fec
    }
    printf("\n");
 
-   whiten(msg_data, len);
-
    if(fec_N == 0 && fec_K == 0) {
+      len += getPadBytes(len); 
+      printf("padded_len: %d\n", len); fflush(stdout);
       d_msg = gr_make_message(0, 0, 0, len);
-      //d_msg->set_header(msg->header());
+      //memset(d_msg->msg(), 0, len);
       memcpy(d_msg->msg(), msg_data, len);
-      return;
    }
+   else {
+      std::string coded_msg = digital_tx_wrapper(std::string((const char*) msg_data, len), fec_N, fec_K, 0);
+      len = coded_msg.length();
+      len += getPadBytes(len);
+      d_msg = gr_make_message(0, 0, 0, len);
+      memset(d_msg->msg(), 0, len);
+      memcpy(d_msg->msg(), coded_msg.data(), len);
+   }
+   printf("33\n"); fflush(stdout);
+
+   printf("len:%d\n", len); fflush(stdout);
+   interleave(d_msg->msg(), len);
+   whiten(d_msg->msg(), len);
 
    free(msg_data);
+}
 
-   // TODO: add fec digital_tx_wrapper
+/* required for interleaving, since it expects a full integer # of OFDM symbols */
+inline int
+digital_ofdm_mapper_bcv::getPadBytes(int len) {
+   int num_ofdm_symbols = ceil(((float) ((len) * 8))/(d_data_carriers.size() * d_data_nbits));
+   int pad_bits = (num_ofdm_symbols*d_data_carriers.size()*d_data_nbits) - (len*8);
+   printf("num_ofdm_symbols: %d, pad_bits: %d, len: %d\n", num_ofdm_symbols, pad_bits, len); fflush(stdout);
+   assert(pad_bits%8 == 0);		
+   return pad_bits/8;
 }
 
 inline void
@@ -913,6 +964,16 @@ digital_ofdm_mapper_bcv::make_time_tag(uhd::time_spec_t out_time, bool enforce) 
 
      printf("timestamp: curr (%llu, %f), out (%llu, %f) , last_time (%llu, %f), interval(%lld, %f), interval_samples(%llu), duration(%llu, %f)\n", (uint64_t) c_time.get_full_secs(), c_time.get_frac_secs(), (uint64_t) out_time.get_full_secs(), out_time.get_frac_secs(), (uint64_t) d_last_pkt_time.get_full_secs(), d_last_pkt_time.get_frac_secs(), (int64_t) interval_time.get_full_secs(), interval_time.get_frac_secs(), interval_samples, sync_secs, sync_frac_of_secs); fflush(stdout);
   }
+#if 0
+  else {
+        // disable (put here only to test synchronization) //
+      num_samples = (d_preamble.size()+d_num_hdr_symbols) * (d_fft_length+cp_length);
+      duration =  num_samples*time_per_sample; 
+      sync_secs = (uint64_t) duration;
+      sync_frac_of_secs = duration - (uint64_t) duration;
+      out_time += uhd::time_spec_t(sync_secs, sync_frac_of_secs);
+  }
+#endif
 
   assert(out_time > c_time);
   d_out_pkt_time = out_time;
@@ -1206,11 +1267,13 @@ inline void
 digital_ofdm_mapper_bcv::send_scheduler_msg(int type, FlowId flowId) {
    FlowInfo *fInfo = getFlowInfo(false, flowId);
    if(d_source) fInfo->nextLinkId = '0';
-   printf("send_scheduler_msg type: %d, request_id: %d, flowId: %c, link: %c\n", type, d_request_id, flowId, fInfo->nextLinkId); fflush(stdout);
+   printf("send_scheduler_msg type: %d, request_id: %d, flowId: %c, batch: %d, link: %c\n", type, d_request_id, flowId, fInfo->active_batch, fInfo->nextLinkId); fflush(stdout);
    SchedulerMsg request;
    request.request_id = d_request_id;
    request.nodeId = d_id;
    request.type = type;
+   request.flow = flowId;
+   request.batch_num = fInfo->active_batch;
 
    request.proto = d_proto;
    request.linkId = fInfo->nextLinkId;
@@ -1245,16 +1308,20 @@ digital_ofdm_mapper_bcv::check_scheduler_reply(SchedulerMsg& reply) {
 	   memcpy(&reply, buf, buf_size);
 	   assert(reply.type == REPLY_MSG);
 
-	   printf("check_scheduler_reply, type: %d, request_id: %d, nodeId: %c\n", 
-				reply.type, reply.request_id, reply.nodeId); fflush(stdout);
+	   printf("check_scheduler_reply, type: %d, request_id: %d, nodeId: %c, linkId: %c\n", 
+				reply.type, reply.request_id, reply.nodeId, reply.linkId); fflush(stdout);
 	   break;
 	}
       }
    }
    free(buf);
 
-   bool success = (reply.request_id == d_request_id && reply.nodeId == d_id);
-   return success;
+   if(d_proto == CF) {
+      FlowInfo *fInfo = getFlowInfo(false, reply.flow);
+      return (reply.request_id == d_request_id && ((reply.nodeId == d_id) || (reply.linkId == fInfo->nextLinkId))); 
+   }
+   else 
+      return (reply.request_id == d_request_id && (reply.nodeId == d_id));
 }
 
 inline void
@@ -1421,7 +1488,7 @@ digital_ofdm_mapper_bcv::source_PRO(FlowInfo *flowInfo) {
   /* add crc and fec */
   gr_message_sptr e_msg = gr_make_message(0, 0, 0, data_len);
   memcpy(e_msg->msg(), &(pkt[d_batch_size]), data_len);
-  add_crc_and_fec(e_msg, 0, 0);
+  add_crc_and_fec(e_msg);
 
   /* clean up */
   free(pkt); e_msg.reset();
@@ -1564,7 +1631,7 @@ digital_ofdm_mapper_bcv::make_packet_PRO_fwd() {
    /* add crc and fec */
    gr_message_sptr e_msg = gr_make_message(0, 0, 0, data_len);
    memcpy(e_msg->msg(), &(pkt[d_batch_size]), data_len);
-   add_crc_and_fec(e_msg, 0, 0);
+   add_crc_and_fec(e_msg);
 
    /* clean up */
    free(pkt); e_msg.reset();
@@ -1745,6 +1812,7 @@ digital_ofdm_mapper_bcv::work_forwarder_CF(int noutput_items,
       bool request_sent = false;
       SchedulerMsg reply;
       FlowId flowId;
+      bool isLead = false;
       while(1) {
          bool tx_ok = check_credit_CF(true, flowId);           // blocking!
          if(!tx_ok) continue;
@@ -1770,13 +1838,15 @@ digital_ofdm_mapper_bcv::work_forwarder_CF(int noutput_items,
          }
 	
 	 if(reply.lead_sender == d_id) {
+	    isLead = true;
             make_time_tag(d_out_pkt_time, false);           // do not enforce 'd_out_pkt_time'
 	    if(reply.num_tx > 1) 
                send_trigger_CF(reply);
          }
 	 else {
+	    isLead = false;
 	    TriggerMsg rx_trigger;
-	    get_trigger_CF(rx_trigger);			    // blocking!
+	    get_trigger_CF(rx_trigger, reply);			    // blocking!
 	
 	    assert(rx_trigger.lead_id == reply.lead_sender);
 	    assert(rx_trigger.flow == reply.flow);
@@ -1789,7 +1859,7 @@ digital_ofdm_mapper_bcv::work_forwarder_CF(int noutput_items,
 	 }
          break;
       } // while
-      prepare_packet_CF_fwd();
+      prepare_packet_CF_fwd(reply.lead_sender);
    }
 
    /* the payload is already modulated, and only the header needs to be modulated */
@@ -1797,9 +1867,10 @@ digital_ofdm_mapper_bcv::work_forwarder_CF(int noutput_items,
    return modulate_and_send(noutput_items, input_items, output_items, fInfo);
 }
 
-/* just prepare to fwd a CF_packet */
+/* just prepare to fwd a CF_packet - the param is passed to ensure only the lead replies 
+   to the scheduler with the COMPLETE message */
 void
-digital_ofdm_mapper_bcv::prepare_packet_CF_fwd()
+digital_ofdm_mapper_bcv::prepare_packet_CF_fwd(NodeId leadId)
 {
    /* get the flow that needs to be serviced */
    assert(d_flow_q_CF.size() >= 1);
@@ -1810,9 +1881,11 @@ digital_ofdm_mapper_bcv::prepare_packet_CF_fwd()
    assert(d_flow >= 0);
    FlowInfo *fInfo = getFlowInfo(false, d_flow);
    fInfo->nextLinkId = nextLinkId;
+   fInfo->isLead = (leadId == d_id)?true:false;
+   fInfo->leadId = leadId;
    d_flow_q_CF.erase(d_flow_q_CF.begin());
 
-   printf("prepare_packet_CF_fwd -- flow: %c, nextLinkId: %c\n", d_flow, nextLinkId); fflush(stdout);
+   printf("prepare_packet_CF_fwd -- flow: %c, nextLinkId: %c, isLead: %d\n", d_flow, nextLinkId, fInfo->isLead); fflush(stdout);
 
    /* init other params */
    assert(d_modulated);
@@ -1875,13 +1948,15 @@ digital_ofdm_mapper_bcv::open_trigger_sock_CF() {
       exit(1);
    }
 
-   sin.sin_family = PF_INET;
+   sin.sin_family = AF_INET;
    sin.sin_addr.s_addr = INADDR_BROADCAST;
    sin.sin_port = htons(5555);
    if(bind(d_trigger_sock, (struct sockaddr *)&sin, sizeof(sin)) < 0) {
       perror("bind");
       exit(1);
    } 
+
+   printf("errno: %d\n", errno); fflush(stdout);
 }
 
 /* trigger broadcast to everyone listening */
@@ -1889,6 +1964,7 @@ inline void
 digital_ofdm_mapper_bcv::send_trigger_CF(SchedulerMsg reply) {
    TriggerMsg trigger;
    trigger.lead_id = d_id;
+   trigger.seqNo = reply.seqNo;
    trigger.num_tx = reply.num_tx;
    trigger.flow = reply.flow;
    trigger.batch_num = reply.batch_num;
@@ -1898,21 +1974,41 @@ digital_ofdm_mapper_bcv::send_trigger_CF(SchedulerMsg reply) {
 
    short num_tx = trigger.num_tx;
    assert(num_tx < MAX_SENDERS);
- 
+
+   printf("send_trigger_CF, seqNo: %d, lead: %c, num_tx: %d, flow: %c, batch: %d\n", 
+			    trigger.seqNo, d_id, num_tx, trigger.flow, trigger.batch_num); fflush(stdout);
+
    for(int i = 0; i < num_tx; i++) 
       trigger.senders[i] = reply.senders[i];
+
+   struct sockaddr_in sendaddr;
+   memset(&sendaddr, 0, sizeof sendaddr);
+   sendaddr.sin_family = AF_INET;
+   sendaddr.sin_port = htons(5555);
+   sendaddr.sin_addr.s_addr = INADDR_BROADCAST;
    
    int buf_size = sizeof(TriggerMsg);
    char *buf = (char*) malloc(buf_size);
    memcpy(buf, &trigger, buf_size);
 
-   assert(send(d_trigger_sock, buf, buf_size, 0) >= 0);
+#if 1
+   if(sendto(d_trigger_sock, buf, buf_size, 0, (struct sockaddr *)& sendaddr, sizeof(sendaddr)) < 0) {
+      printf("errno: %d\n", errno); fflush(stdout);
+      assert(false);
+   }
+#else
+   if(send(d_trigger_sock, buf, buf_size, 0) < 0) {
+      printf("errno: %d\n", errno); fflush(stdout);
+      assert(false);
+   }
+#endif
+
    free(buf);
 }
 
 /* block waiting for the trigger from the lead sender */
 inline void
-digital_ofdm_mapper_bcv::get_trigger_CF(TriggerMsg& trigger) {
+digital_ofdm_mapper_bcv::get_trigger_CF(TriggerMsg& trigger, SchedulerMsg reply) {
    printf("get_trigger_CF\n"); fflush(stdout);
    uhd::time_spec_t out_time;
    int buf_size = sizeof(TriggerMsg);
@@ -1927,8 +2023,11 @@ digital_ofdm_mapper_bcv::get_trigger_CF(TriggerMsg& trigger) {
             nbytes = recv(d_trigger_sock, eth_buf+offset, buf_size-offset, 0);
             if(nbytes > 0) offset += nbytes;
             if(offset == buf_size) {
-	       done = true;
 	       memcpy(&trigger, eth_buf, buf_size);
+	       if(trigger.seqNo != reply.seqNo) {
+		  break;
+	       }
+	       done = true;
                break;
             }
          }
@@ -2191,4 +2290,35 @@ digital_ofdm_mapper_bcv::populateCreditInfo_CF() {
         }
    }
    fclose (fl);
+}
+
+inline void
+digital_ofdm_mapper_bcv::interleave(unsigned char *data, int len) {
+
+   /* convert to bits */
+   std::string orig_s;
+   for(int i = 0; i < len; i++) {
+       std::bitset<sizeof(unsigned char) * 8> s_bits(data[i]);
+       std::string tmp_string = s_bits.to_string<char,std::char_traits<char>,std::allocator<char> >();
+       orig_s.append(tmp_string);
+   }
+   int len_bits = orig_s.length();
+   printf("len_bits: %d, len: %d\n", len_bits, len); fflush(stdout);
+   assert(len_bits == len*8);
+
+   unsigned char *out = (unsigned char*) malloc(len_bits);
+   for(unsigned i = 0; i < len_bits; i += d_interleave_map.size()) {
+       for(unsigned j = 0; j < d_interleave_map.size(); ++j) {
+           out[i+d_interleave_map[j]] = (orig_s.data())[i+j];
+       }
+   }
+
+   /*convert back to data */
+   string tmp_s((const char*) out, len_bits);
+   for(int i = 0, k = 0; i < len_bits; i=i+8)
+   {
+      bitset<sizeof(unsigned char)*8> s_bits(tmp_s.substr(i, 8));
+      data[k++] = (unsigned char) s_bits.to_ulong();
+   }
+   free(out);
 }

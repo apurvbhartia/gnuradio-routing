@@ -154,7 +154,10 @@ typedef struct flow_info_str {
  
   /* for pro */
   unsigned char coeffs[MAX_BATCH_SIZE];		// only holds the coeffs for the current packet (working copy) - others are held in NetCoder pkt_lst //
-  
+
+  /* for cf */
+  NodeId leadId;
+  bool isLead;  
 } FlowInfo;
 
 typedef std::vector<FlowInfo*> FlowInfoVector;
@@ -163,6 +166,7 @@ typedef std::vector<FlowInfo*> FlowInfoVector;
 #pragma pack(1)
 typedef struct scheduler_msg {
   int request_id;
+  int seqNo;
   NodeId nodeId;
   int type;
 
@@ -170,7 +174,7 @@ typedef struct scheduler_msg {
   short num_tx;
   NodeId lead_sender;
   FlowId flow;
-  unsigned int batch_num;			// even if batch_size = 1, batch_num is not pkt_num, since multiple retx might happen for same batch
+  int batch_num;			// even if batch_size = 1, batch_num is not pkt_num, since multiple retx might happen for same batch
   short proto;
   LinkId linkId;
   NodeId senders[MAX_SENDERS];
@@ -178,6 +182,7 @@ typedef struct scheduler_msg {
 
 typedef struct trigger_msg {
   NodeId lead_id;
+  int seqNo;
   short num_tx;
   FlowId flow;
   unsigned int batch_num;
@@ -222,6 +227,41 @@ typedef std::vector<CompositeLink*> CompositeLinkVector;
   using equal gain or mrc */
 typedef std::vector<gr_complex*> PktSymbolsVector;			// vector of packets //
 typedef std::map<FlowId, PktSymbolsVector*> FlowPktVector;		// "above" .. for a flow //
+
+/* interleaving */
+struct BitInterleave {
+  unsigned d_bpsc; // coded bits per subcarrier
+  unsigned d_cbps; // coded bits per symbol
+  static const int d_num_chunks = 16;
+
+  BitInterleave(int ncarriers, int nbits)
+    : d_bpsc(nbits), d_cbps(nbits * ncarriers) {}
+
+  unsigned index(unsigned k) {
+    // see 17.3.5.6 in 802.11a-1999, floor is implicit
+    assert (k < d_cbps);
+    unsigned s = std::max(d_bpsc / 2, (unsigned)1);
+    unsigned i = (d_cbps / d_num_chunks) * (k % d_num_chunks) + (k / d_num_chunks);
+    unsigned j = s * (i / s) + (i + d_cbps - (d_num_chunks * i / d_cbps)) % s;
+    assert (j < d_cbps);
+    return j;
+  }
+
+  void fill(std::vector<unsigned> &v, bool inverse) {
+    v.resize(d_cbps);
+    if (!inverse) {
+      for (unsigned i = 0; i < d_cbps; ++i) {
+        v[i] = index(i);
+      }
+    } else {
+
+      for (unsigned i = 0; i < d_cbps; ++i) {
+        v[index(i)] = i;
+      }
+    }
+  }
+};
+
 
 class gr_message;
 typedef boost::shared_ptr<gr_message> gr_message_sptr;

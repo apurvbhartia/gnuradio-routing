@@ -335,7 +335,9 @@ digital_make_ofdm_mapper_bcv (const std::vector<gr_complex> &hdr_constellation,
 			 unsigned int id=1,
 			 unsigned int source_flag=0,
 			 unsigned int batch_size=1,
-		 	 unsigned int dst_id=2);
+		 	 unsigned int dst_id=2, 
+			 unsigned int fec_n=0,
+			 unsigned int fec_k=0);
 
 /*!
  * \brief take a stream of bytes in and map to a vector of complex
@@ -356,7 +358,8 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
 			   unsigned int tdma, unsigned int proto,
 			   unsigned int id,
 			   unsigned int source_flag,
-			   unsigned int batch_size, unsigned int dst_id);
+			   unsigned int batch_size, unsigned int dst_id,
+			   unsigned int fec_n, unsigned int fec_k);
  protected:
   digital_ofdm_mapper_bcv (const std::vector<gr_complex> &hdr_constellation, 
 			 const std::vector<gr_complex> &data_constellation,
@@ -366,7 +369,8 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
 			 unsigned int tdma, unsigned int proto,
 			 unsigned int id,
 			 unsigned int source_flag,
-			 unsigned int batch_size, unsigned int dst_id);
+			 unsigned int batch_size, unsigned int dst_id,
+			 unsigned int fec_n, unsigned int fec_k);
 
  private:
   /* data */
@@ -508,7 +512,7 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
   map<unsigned char, bool> d_nextHopIds;
 
 
-  unsigned char d_flow;
+  FlowId d_flow;
   FlowInfoVector d_flowInfoVector;
   FlowInfo* getFlowInfo(bool create, unsigned char flowId);
   void populateFlowInfo();
@@ -539,7 +543,7 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
 			FlowInfo *flowInfo);
 
   /* encoding/decoding */
-  void add_crc_and_fec(gr_message_sptr, int, int);
+  void add_crc_and_fec(gr_message_sptr);
   FlowNetCoderMap d_NetCoderMap;
   NetCoder* getNetCoder(FlowId, int);
   void GetEncodedPacket(uint8_t*, FlowInfo*);
@@ -563,7 +567,7 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
   /* for CF */
   int work_CF(int, gr_vector_const_void_star&, gr_vector_void_star&);
   int work_forwarder_CF(int, gr_vector_const_void_star&, gr_vector_void_star&);
-  void prepare_packet_CF_fwd();
+  void prepare_packet_CF_fwd(NodeId);
   void copyOFDMSymbolData_CF(gr_complex*);
   void processPacket_CF(gr_message_sptr, FlowInfo*);
 
@@ -576,12 +580,17 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
   void open_trigger_sock_CF();
   void send_trigger_abort_CF(SchedulerMsg);
   void send_trigger_CF(SchedulerMsg);
-  void get_trigger_CF(TriggerMsg&);
+  void get_trigger_CF(TriggerMsg&, SchedulerMsg);
   SockId d_trigger_sock;
 
   FlowPktVector d_flowPktVector;
   CreditInfoVector_CF d_creditInfoVector_CF;
   vector<std::pair<FlowId, LinkId> > d_flow_q_CF;
+
+  vector<unsigned> d_interleave_map;
+  void interleave(unsigned char*, int);
+  int getPadBytes(int);
+  int fec_N, fec_K;
 };
 
 #endif

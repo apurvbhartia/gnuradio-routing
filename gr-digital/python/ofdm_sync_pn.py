@@ -1,135 +1,136 @@
 #!/usr/bin/env python
+# -*- coding: utf-8 -*-
 #
-# Copyright 2007,2008 Free Software Foundation, Inc.
-# 
-# This file is part of GNU Radio
-# 
-# GNU Radio is free software; you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation; either version 3, or (at your option)
-# any later version.
-# 
-# GNU Radio is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-# 
-# You should have received a copy of the GNU General Public License
-# along with GNU Radio; see the file COPYING.  If not, write to
-# the Free Software Foundation, Inc., 51 Franklin Street,
-# Boston, MA 02110-1301, USA.
-# 
+# Copyright 2010 Szymon Jakubczak
+#
 
 import math
 from numpy import fft
 from gnuradio import gr
 
 class ofdm_sync_pn(gr.hier_block2):
-    def __init__(self, fft_length, cp_length, kstime, threshold, logging=False):
-        """
-        OFDM synchronization using PN Correlation:
-        T. M. Schmidl and D. C. Cox, "Robust Frequency and Timing
-        Synchonization for OFDM," IEEE Trans. Communications, vol. 45,
-        no. 12, 1997.
-        """
-        
-	gr.hier_block2.__init__(self, "ofdm_sync_pn",
-				gr.io_signature(1, 1, gr.sizeof_gr_complex), # Input signature
-                                gr.io_signature2(2, 2, gr.sizeof_float, gr.sizeof_char)) # Output signature
+  """
+  OFDM synchronization using pseudo-noise correlation.
+  T. M. Schmidl and D. C. Cox, "Robust Frequency and Timing
+  Synchonization for OFDM," IEEE Trans. Communications, vol. 45,
+  no. 12, 1997.
 
-        self.input = gr.add_const_cc(0)
+  Assumes that the signal preamble is two identical copies of pseudo-noise
+  half-symbols. Equivalently in frequency domain, the odd freqencies are 0.
 
-        # PN Sync
+  The two half-symbols are expected to be offset by pi T deltaf.
+  This method can detect the timing and the frequency offset but only within
+  +- 1/T.
 
-        # Create a delay line
-        self.delay = gr.delay(gr.sizeof_gr_complex, fft_length/2)
+  Let L = T/2
+  P(d) = sum_{i=1..L} x[d+i] x[d+i+L]*
+  R(d) = sum_{i=1..L} |x[d+i+L]|^2
+  M(d) = |P(d)|^2/R(d)^2
+  d_opt = argmax_d M(d)
+  timing_start := d_opt
+  fine_freq := angle(P(d_opt)) / (2 pi L)
 
-        # Correlation from ML Sync
-        self.conjg = gr.conjugate_cc();
-        self.corr = gr.multiply_cc();
+  Observe: angle(P(d_opt)) is in [-pi, pi]
+    Therefore max CFO that can be detected is 1/(2L) * fft_len
 
-        # Create a moving sum filter for the corr output
-        if 1:
-            moving_sum_taps = [1.0 for i in range(fft_length//2)]
-            self.moving_sum_filter = gr.fir_filter_ccf(1,moving_sum_taps)
-        else:
-            moving_sum_taps = [complex(1.0,0.0) for i in range(fft_length//2)]
-            self.moving_sum_filter = gr.fft_filter_ccc(1,moving_sum_taps)
+  outputs:
+    Output 0: delayed signal
+    Output 1: fine frequency correction value (to drive NCO)
+    Output 2: timing signal (indicates first sample of preamble)
 
-        # Create a moving sum filter for the input
-        self.inputmag2 = gr.complex_to_mag_squared()
-        movingsum2_taps = [1.0 for i in range(fft_length//2)]
-	#movingsum2_taps = [0.5 for i in range(fft_length*4)]		#apurv - implementing Veljo's suggestion, when pause b/w packets
+  NOTE: This is equivalent to ofdm_sync_pn.py in trunk.
+  Edited for readability only.
+  """
+  def __init__(self, fft_length, cp_length, half_sync, logging=False):
+    gr.hier_block2.__init__(self, "ofdm_sync_pn",
+      gr.io_signature(1, 1, gr.sizeof_gr_complex), # Input signature
+      gr.io_signature3(3, 3,    # Output signature
+        gr.sizeof_gr_complex,   # delayed input
+        gr.sizeof_float,        # fine frequency offset
+        gr.sizeof_char          # timing indicator
+      ))
 
-        if 1:
-            self.inputmovingsum = gr.fir_filter_fff(1,movingsum2_taps)
-        else:
-            self.inputmovingsum = gr.fft_filter_fff(1,movingsum2_taps)
+    if half_sync:
+      period = fft_length/2
+      window = fft_length/2
+    else: # full symbol
+      period = fft_length + cp_length
+      window = fft_length       # makes the plateau cp_length long
 
-        self.square = gr.multiply_ff()
-        self.normalize = gr.divide_ff()
-     
-        # Get magnitude (peaks) and angle (phase/freq error)
-        self.c2mag = gr.complex_to_mag_squared()
-        self.angle = gr.complex_to_arg()
+    # Calculate the frequency offset from the correlation of the preamble
+    x_corr = gr.multiply_cc()
+    self.connect(self, gr.conjugate_cc(), (x_corr, 0))
+    self.connect(self, gr.delay(gr.sizeof_gr_complex, period), (x_corr, 1))
+    P_d = gr.moving_average_cc(window, 1.0)
+    self.connect(x_corr, P_d)
 
-        self.sample_and_hold = gr.sample_and_hold_ff()
+    P_d_angle = gr.complex_to_arg()
+    self.connect(P_d, P_d_angle)
 
-        #ML measurements input to sampler block and detect
-        self.sub1 = gr.add_const_ff(-1)
-        self.pk_detect = gr.peak_detector_fb(0.20, 0.20, 30, 0.001)	#apurv - implementing Veljo's suggestion, when pause b/w packets
+    # Get the power of the input signal to normalize the output of the correlation
+    R_d = gr.moving_average_ff(window, 1.0)
+    self.connect(self, gr.complex_to_mag_squared(), R_d)
+    R_d_squared = gr.multiply_ff() # this is retarded
+    self.connect(R_d, (R_d_squared, 0))
+    self.connect(R_d, (R_d_squared, 1))
+    M_d = gr.divide_ff()
+    self.connect(P_d, gr.complex_to_mag_squared(), (M_d, 0))
+    self.connect(R_d_squared, (M_d, 1))
 
-        self.connect(self, self.input)
-        
-        # Calculate the frequency offset from the correlation of the preamble
-        self.connect(self.input, self.delay)
-        self.connect(self.input, (self.corr,0))
-        self.connect(self.delay, self.conjg)
-        self.connect(self.conjg, (self.corr,1))
+    # Now we need to detect peak of M_d
 
+    # NOTE: replaced fir_filter with moving_average for clarity
+    # the peak is up to cp_length long, but noisy, so average it out
+    #matched_filter_taps = [1.0/cp_length for i in range(cp_length)]
+    #matched_filter = gr.fir_filter_fff(1, matched_filter_taps)
+    matched_filter = gr.moving_average_ff(cp_length, 1.0/cp_length)
 
-        self.connect(self.corr, self.moving_sum_filter)
-        #self.connect(self.moving_sum_filter, self.c2mag)
-        self.connect(self.moving_sum_filter, self.angle)
-        self.connect(self.angle, (self.sample_and_hold,0))		# apurv--
-	#self.connect(self.angle, gr.delay(gr.sizeof_float, offset), (self.sample_and_hold, 0))	#apurv++
+    # NOTE: the look_ahead parameter doesn't do anything
+    # these parameters are kind of magic, increase 1 and 2 (==) to be more tolerant
+    peak_detect = gr.peak_detector_fb(0.25, 0.25, 30, 0.001)
+    # NOTE: gr.peak_detector_fb is broken!
+    #peak_detect = gr.peak_detector_fb(0.55, 0.55, 30, 0.001)
+    #peak_detect = gr.peak_detector_fb(0.45, 0.45, 30, 0.001)
+    #peak_detect = gr.peak_detector_fb(0.30, 0.30, 30, 0.001)
 
-	cross_correlate = 1
-	if cross_correlate==1:
-	   # cross-correlate with the known symbol
-	   kstime = [k.conjugate() for k in kstime]
-           kstime.reverse()
-           self.crosscorr_filter = gr.fir_filter_ccc(1, kstime)
+    # offset by -1
+    self.connect(M_d, matched_filter, gr.add_const_ff(-1), peak_detect)
 
-	   # get the magnitude #
-	   self.corrmag = gr.complex_to_mag_squared()
+    # peak_detect indicates the time M_d is highest, which is the end of the symbol.
+    # We should try to sample in the middle of the plateau!!
+    # FIXME until we figure out how to do this, just offset by cp_length/2
+    offset = cp_length/2 #cp_length/2
 
-	   self.f2b = gr.float_to_char()
-	   self.threshold_factor = threshold #0.0012 #0.012   #0.0015
-	   self.slice = gr.threshold_ff(self.threshold_factor, self.threshold_factor, 0, fft_length)
+    # nco(t) = P_d_angle(t-offset) sampled at peak_detect(t)
+    # modulate input(t - fft_length) by nco(t)
+    # signal to sample input(t) at t-offset
+    #
+    # We can't delay by < 0 so instead:
+    # input is delayed by fft_length
+    # P_d_angle is delayed by offset
+    # signal to sample is delayed by fft_length - offset
+    #
+    phi = gr.sample_and_hold_ff()
+    self.connect(peak_detect, (phi,1))
+    self.connect(P_d_angle, gr.delay(gr.sizeof_float, offset), (phi,0))
+    #self.connect(P_d_angle, matched_filter2, (phi,0)) # why isn't this better?!?
 
-	   self.connect(self.input, self.crosscorr_filter, self.corrmag, self.slice, self.f2b)
+    # FIXME: we add fft_length delay so that the preamble is nco corrected too
+    # BUT is this buffering worth it? consider implementing sync as a proper block
 
-	   # some debug dump #
-	   self.connect(self.corrmag, gr.file_sink(gr.sizeof_float, "ofdm_corrmag.dat"))
-	   self.connect(self.f2b, gr.file_sink(gr.sizeof_char, "ofdm_f2b.dat"))
-	   
+    # delay the input signal to follow the frequency offset signal
+    self.connect(self, gr.delay(gr.sizeof_gr_complex, (fft_length+offset)), (self,0))
+    self.connect(phi, (self,1))
+    self.connect(peak_detect, (self,2))
 
-	self.connect(self.f2b, (self.sample_and_hold,1))
-	
-        # Set output signals
-        #    Output 0: fine frequency correction value
-        #    Output 1: timing signal
-        self.connect(self.sample_and_hold, (self,0))
-	#self.connect(self.pk_detect, (self,1))									#removed
-	#self.connect(self.f2b, gr.delay(gr.sizeof_char, 1), (self, 1))
-	self.connect(self.f2b, (self, 1))
+    self.connect(peak_detect, gr.file_sink(gr.sizeof_char, "sync-peaks_b.dat"))
+    self.connect(matched_filter, gr.file_sink(gr.sizeof_float, "sync-mf.dat"))
 
-        if logging:
-            self.connect(self.matched_filter, gr.file_sink(gr.sizeof_float, "ofdm_sync_pn-mf_f.dat"))
-            self.connect(self.normalize, gr.file_sink(gr.sizeof_float, "ofdm_sync_pn-theta_f.dat"))
-            self.connect(self.angle, gr.file_sink(gr.sizeof_float, "ofdm_sync_pn-epsilon_f.dat"))
-            self.connect(self.pk_detect, gr.file_sink(gr.sizeof_char, "ofdm_sync_pn-peaks_b.dat"))
-            self.connect(self.sample_and_hold, gr.file_sink(gr.sizeof_float, "ofdm_sync_pn-sample_and_hold_f.dat"))
-            self.connect(self.input, gr.file_sink(gr.sizeof_gr_complex, "ofdm_sync_pn-input_c.dat"))
+    if logging:
+      self.connect(matched_filter, gr.file_sink(gr.sizeof_float, "sync-mf.dat"))
+      self.connect(M_d, gr.file_sink(gr.sizeof_float, "sync-M.dat"))
+      self.connect(P_d_angle, gr.file_sink(gr.sizeof_float, "sync-angle.dat"))
+      self.connect(peak_detect, gr.file_sink(gr.sizeof_char, "sync-peaks.datb"))
+      self.connect(phi, gr.file_sink(gr.sizeof_float, "sync-phi.dat"))
+
 

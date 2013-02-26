@@ -128,7 +128,8 @@ class ofdm_mod(gr.hier_block2):
 					     options.tdma, options.proto,
                                              options.id, options.src,
                                              options.batch_size,
-					     options.dst_id)	
+					     options.dst_id,
+					     options.fec_n, options.fec_k)	
 
         self.ifft = gr.fft_vcc(self._fft_length, False, win, True)
 
@@ -145,7 +146,8 @@ class ofdm_mod(gr.hier_block2):
 	   else:
 	       # some burst tagger connections #
 	       self.connect((self._pkt_input, 0), self.ifft, self.cp_adder, self.burst_tagger, self.scale, self)
-               self.connect((self._pkt_input, 1), (self.cp_adder, 1), (self.burst_tagger,1))   # Connect Apurv's trigger data to the burst tagger	
+               self.connect((self._pkt_input, 1), (self.cp_adder, 1), (self.burst_tagger,1))   # Connect Apurv's trigger data to the burst tagger
+	       self.connect((self._pkt_input, 2), (self.cp_adder, 2))                          # CDD
 
         elif manual == 1:
 	   # punt the pkt_input and use file source # 
@@ -167,8 +169,8 @@ class ofdm_mod(gr.hier_block2):
 
 	#self.connect(self.cp_adder, gr.file_sink(gr.sizeof_gr_complex, "ofdm_cp_adder_c.dat"))
 	self.connect(self._pkt_input, gr.file_sink(gr.sizeof_gr_complex*options.fft_length, "symbols_src.dat"))
-	self.connect((self._pkt_input, 2), gr.file_sink(gr.sizeof_char, "timing.dat"))
-        self.connect((self._pkt_input, 3), gr.file_sink(gr.sizeof_char*options.fft_length, "timing_src.dat"))
+	self.connect((self._pkt_input, 3), gr.file_sink(gr.sizeof_char, "timing.dat"))
+        self.connect((self._pkt_input, 4), gr.file_sink(gr.sizeof_char*options.fft_length, "timing_src.dat"))
 
     def send_pkt(self, payload, _type=0, eof=False):
         """
@@ -230,6 +232,7 @@ class ofdm_mod(gr.hier_block2):
                           help="external TDMA scheduler [default=%default]")
         expert.add_option("", "--proto", type="intx", default=0,
                           help="SPP:0, PRO: 1 [default=%default]")
+
 	# apurv++ end #
 
     # Make a static method to call before instantiation

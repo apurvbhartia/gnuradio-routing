@@ -32,7 +32,8 @@ digital_make_ofdm_mapper_bcv (const std::vector<gr_complex> &hdr_constellation,
                          unsigned int id=1,
                          unsigned int source_flag=0,
                          unsigned int batch_size=1,
-                         unsigned int dst_id=2) throw(std::exception);
+                         unsigned int dst_id=2,
+                         unsigned int fec_n=0, unsigned int fec_k=0) throw(std::exception);
 
 
 class digital_ofdm_mapper_bcv : public gr_sync_block
@@ -48,7 +49,8 @@ class digital_ofdm_mapper_bcv : public gr_sync_block
                       unsigned int id,
                       unsigned int source_flag,
                       unsigned int batch_size,
-                      unsigned int dst_id);
+                      unsigned int dst_id,
+                      unsigned int fec_n, unsigned int fec_k);
 
  public:
   gr_msg_queue_sptr msgq();

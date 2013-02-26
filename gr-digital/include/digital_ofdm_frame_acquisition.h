@@ -82,7 +82,7 @@ protected:
   
  private:
   unsigned char slicer(gr_complex x);
-  void correlate(const gr_complex *symbol, int zeros_on_left);
+  float correlate(const gr_complex *symbol, int zeros_on_left);
   void calculate_equalizer(const gr_complex *symbol, int zeros_on_left);
   gr_complex coarse_freq_comp(float freq_delta, int count);
   
@@ -93,6 +93,10 @@ protected:
   //std::vector<gr_complex> d_known_symbol; // !< \brief known symbols at start of frame
   const std::vector<std::vector<gr_complex> >  d_known_symbol;
   std::vector<float> d_known_phase_diff; // !< \brief factor used in correlation from known symbol
+
+  std::vector<gr_complex> d_symbol_diff;
+  std::vector<gr_complex> d_known_diff;
+  float d_known_norm;
   std::vector<float> d_symbol_phase_diff; // !< \brief factor used in correlation from received symbol
   //std::vector<gr_complex> d_hestimate;  // !< channel estimate
   gr_complex *d_hestimate;
@@ -104,6 +108,18 @@ protected:
 
   void forecast(int noutput_items, gr_vector_int &ninput_items_required);
   unsigned int d_cur_symbol;
+
+
+  // channel estimate computation
+  void init_estimate(const gr_complex *symbol); // one even-freq-only symbol
+  void update_estimate(const gr_complex *symbol); // extra symbols
+  void finish_estimate(); // normalize
+
+  inline gr_complex compensate() const; // coarse freq compensation factor
+  inline int pad() const;
+
+  bool d_signal_out; // should indicate signal_out on the next symbol
+
 
  public:
   /*!

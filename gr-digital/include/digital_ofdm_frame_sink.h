@@ -565,7 +565,7 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
 
   void calc_outgoing_timestamp(uint64_t &sync_secs, double &sync_frac_of_secs); 
   void print_msg(std::string); 
-  int d_expected_size, d_fec_n, d_fec_k;
+  int d_expected_size, fec_N, fec_K;
   int d_crc;			// keeps track of how many pkts decoded correctly in the batch //
 
  /* util functions */
@@ -606,5 +606,8 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
  void makePacket_CF(FlowInfo *fInfo);
 
  // --------------------------------- CF ends ------------------------------- //
+
+ vector<unsigned> d_interleave_map;
+ void deinterleave(unsigned char*, int);
 };
 #endif /* INCLUDED_GR_OFDM_FRAME_SINK_H */

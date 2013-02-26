@@ -85,8 +85,8 @@ digital_ofdm_sampler::digital_ofdm_sampler (unsigned int fft_length,
 				  unsigned int num_preambles,
 				  unsigned int timeout)
   : gr_block ("ofdm_sampler",
-	      gr_make_io_signature3 (2, 3, sizeof (gr_complex), sizeof(char), sizeof(float)),
-	      gr_make_io_signature3 (2, 3, sizeof (gr_complex)*fft_length, sizeof(char)*fft_length, sizeof(gr_complex)*fft_length)),
+	      gr_make_io_signature2 (2, 2, sizeof (gr_complex), sizeof(char)),
+	      gr_make_io_signature2 (2, 2, sizeof (gr_complex)*fft_length, sizeof(char))),
     d_state(STATE_NO_SIG), d_timeout_max(timeout), d_fft_length(fft_length), d_symbol_length(symbol_length),
     d_fp(NULL), d_fd(0), d_file_opened(false), d_num_preambles(num_preambles) 
 {
@@ -108,13 +108,13 @@ digital_ofdm_sampler::forecast (int noutput_items, gr_vector_int &ninput_items_r
 {
   // FIXME do we need more
   //int nreqd  = (noutput_items-1) * d_symbol_length + d_fft_length;
-  int nreqd  = d_symbol_length + d_fft_length;
+  int nreqd  = noutput_items*d_symbol_length;
   unsigned ninputs = ninput_items_required.size ();
   for (unsigned i = 0; i < ninputs; i++)
     ninput_items_required[i] = nreqd;
 }
 
-
+#if 0
 int
 digital_ofdm_sampler::general_work (int noutput_items,
 			       gr_vector_int &ninput_items,
@@ -123,11 +123,6 @@ digital_ofdm_sampler::general_work (int noutput_items,
 {
   gr_complex *iptr = (gr_complex *) input_items[0];
   const char *trigger = (const char *) input_items[1];
-
-  float* freq_offset;
-  if(input_items.size() > 2) {
-     freq_offset = (float*) input_items[2];
-  }
 
   gr_complex *optr = (gr_complex *) output_items[0];
   char *outsig = (char *) output_items[1];
@@ -237,12 +232,6 @@ digital_ofdm_sampler::general_work (int noutput_items,
                                                  // 17 is a magic number which was the offset i found them at (decode length?)
       tag.key=SYNC_TIME;    // the "key" of the tag, which I've defined to be "SYNC_TIME"
 
-      /*
-      tag.value = pmt::pmt_make_tuple(
-          pmt::pmt_from_uint64((int)elapsed),      // FPGA clock in seconds that we found the sync
-          pmt::pmt_from_double(elapsed - (int)elapsed)  // FPGA clock in fractional seconds that we found the sync
-        ); */
-
       tag.value = pmt::pmt_make_tuple(
           pmt::pmt_from_uint64(sync_sec),      // FPGA clock in seconds that we found the sync
           pmt::pmt_from_double(sync_frac_sec)  // FPGA clock in fractional seconds that we found the sync
@@ -256,10 +245,8 @@ digital_ofdm_sampler::general_work (int noutput_items,
       printf("(SAMPLER) RX timestamp (%llu, %f), proc_time (%llu, %f)\n", sync_sec, sync_frac_sec, (uint64_t) proc_time.get_full_secs(), proc_time.get_frac_secs());
       fflush(stdout);
 
-      if(1) 
-        std::cout << "--- added sync tag in ofdm_sampler stream at " << nitems_written(1) << "\n";
-      if(1)
-        std::cout << "--- found sync at: " << (int)elapsed << " and " << elapsed-(int)elapsed << " (" << elapsed << ")\n";
+      std::cout << "--- added sync tag in ofdm_sampler stream at " << nitems_written(1) << "\n";
+      std::cout << "--- found sync at: " << (int)elapsed << " and " << elapsed-(int)elapsed << " (" << elapsed << ")\n";
 
     }
     else
@@ -270,14 +257,10 @@ digital_ofdm_sampler::general_work (int noutput_items,
   switch(d_state) {
   case(STATE_PREAMBLE):
     //printf("Set SYMBOL BOUNDARY here .. freq_offset: %.3f\n", freq_offset[index]); fflush(stdout);
-    // When we found a preamble trigger, get it and set the symbol boundary here
-    //correct_freq_offset(&iptr[index-d_symbol_length+1], d_symbol_length, freq_offset[index]);
     for(i = (index - d_fft_length + 1); i <= index; i++) {
       *optr++ = iptr[i];
     }
    
-    //log_preamble(iptr, (index-d_fft_length+1));
- 
     d_timeout = d_timeout_max; // tell the system to expect at least this many symbols for a frame
     d_state = STATE_FRAME;
  
@@ -287,15 +270,9 @@ digital_ofdm_sampler::general_work (int noutput_items,
     break;
     
   case(STATE_FRAME):
-    // use this state when we have processed a preamble and are getting the rest of the frames
-    //FIXME: we could also have a power squelch system here to enter STATE_NO_SIG if no power is received
-
     // skip over fft length history and cyclic prefix
     pos = d_symbol_length;         // keeps track of where we are in the input buffer
  
-    //printf("correct_offset: %.3f\n", freq_offset[pos]); fflush(stdout); 
-    //correct_freq_offset(&iptr[pos-24], d_symbol_length, freq_offset[pos]);
-
     while(pos < d_symbol_length + d_fft_length) {
       *optr++ = iptr[pos++];
     }
@@ -321,6 +298,76 @@ digital_ofdm_sampler::general_work (int noutput_items,
 
   return ret;
 }
+#endif
+
+int
+digital_ofdm_sampler::general_work (int noutput_items,
+                                gr_vector_int &ninput_items,
+                                gr_vector_const_void_star &input_items,
+                                gr_vector_void_star &output_items)
+{
+  const gr_complex *in = (const gr_complex *) input_items[0];
+  const char *trigger = (const char *) input_items[1];
+
+  gr_complex *out = (gr_complex *) output_items[0];
+  char *outsig = (char *) output_items[1];
+
+  int cp_length = d_symbol_length - d_fft_length;
+
+// trigger[t] != 0 indicates that the input should be sampled here.
+// Next input should be sampled d_symbol_length later.
+
+  int nin = 0;
+  int nout = 0;
+
+  outsig[nout] == 0;
+
+  while((nin < ninput_items[0] - d_symbol_length)
+     && (nout < noutput_items)) {
+
+    if (d_state == STATE_SIGNAL) {
+      if(--d_timeout == 0) {
+#if 0
+        std::cerr << "TIMEOUT" << std::endl;
+#endif
+        d_state = STATE_NO_SIG;
+      } else {
+        // copy symbol to output
+        // (it could be a spurious last symbol, but we'd better be safe and include it)
+        memcpy(out + nout * d_fft_length,
+               in + nin,
+               d_fft_length*sizeof(gr_complex));
+        ++nout;
+        outsig[nout] = 0;
+      }
+    }
+
+    nin += d_symbol_length;
+
+    // look for trigger
+    for(int j = nin - d_symbol_length; j < nin; ++j) {
+      if(trigger[j]) {
+        if (j + d_symbol_length <= nin + cp_length) {
+          // we don't allow symbols shorter than cp_length
+          if (nout) {
+            if (outsig[nout-1]) // haven't we just copied it out?
+              continue; // FIXME: this is edge programming!! :-(
+            --nout; // overwrite the most recent output symbol
+          }
+        }
+        // set new sampling offset
+        nin = j;
+        outsig[nout] = 1; // indicate preamble
+        d_state = STATE_SIGNAL;
+        d_timeout = d_timeout_max;
+        break;
+      }
+    }
+  }
+  consume_each(nin);
+  return nout;
+}
+
 
 void
 digital_ofdm_sampler::log_preamble(gr_complex *iptr, long index) {
