@@ -41,7 +41,8 @@ class ofdm_sync_pn(gr.hier_block2):
   NOTE: This is equivalent to ofdm_sync_pn.py in trunk.
   Edited for readability only.
   """
-  def __init__(self, fft_length, cp_length, half_sync, logging=False):
+  #def __init__(self, fft_length, cp_length, half_sync, logging=False):
+  def __init__(self, fft_length, cp_length, half_sync, kstime, threshold, logging=False):
     gr.hier_block2.__init__(self, "ofdm_sync_pn",
       gr.io_signature(1, 1, gr.sizeof_gr_complex), # Input signature
       gr.io_signature3(3, 3,    # Output signature
@@ -67,64 +68,54 @@ class ofdm_sync_pn(gr.hier_block2):
     P_d_angle = gr.complex_to_arg()
     self.connect(P_d, P_d_angle)
 
-    # Get the power of the input signal to normalize the output of the correlation
-    R_d = gr.moving_average_ff(window, 1.0)
-    self.connect(self, gr.complex_to_mag_squared(), R_d)
-    R_d_squared = gr.multiply_ff() # this is retarded
-    self.connect(R_d, (R_d_squared, 0))
-    self.connect(R_d, (R_d_squared, 1))
-    M_d = gr.divide_ff()
-    self.connect(P_d, gr.complex_to_mag_squared(), (M_d, 0))
-    self.connect(R_d_squared, (M_d, 1))
-
-    # Now we need to detect peak of M_d
-
-    # NOTE: replaced fir_filter with moving_average for clarity
-    # the peak is up to cp_length long, but noisy, so average it out
-    #matched_filter_taps = [1.0/cp_length for i in range(cp_length)]
-    #matched_filter = gr.fir_filter_fff(1, matched_filter_taps)
-    matched_filter = gr.moving_average_ff(cp_length, 1.0/cp_length)
-
-    # NOTE: the look_ahead parameter doesn't do anything
-    # these parameters are kind of magic, increase 1 and 2 (==) to be more tolerant
-    peak_detect = gr.peak_detector_fb(0.25, 0.25, 30, 0.001)
-    # NOTE: gr.peak_detector_fb is broken!
-    #peak_detect = gr.peak_detector_fb(0.55, 0.55, 30, 0.001)
-    #peak_detect = gr.peak_detector_fb(0.45, 0.45, 30, 0.001)
-    #peak_detect = gr.peak_detector_fb(0.30, 0.30, 30, 0.001)
-
     # offset by -1
-    self.connect(M_d, matched_filter, gr.add_const_ff(-1), peak_detect)
+    phi = gr.sample_and_hold_ff()	
+	
+    cross_correlate = 1
+    if cross_correlate==1:
+       # cross-correlate with the known symbol
+	kstime = [k.conjugate() for k in kstime]
+	kstime.reverse()
+	self.crosscorr_filter = gr.fir_filter_ccc(1, kstime)
 
-    # peak_detect indicates the time M_d is highest, which is the end of the symbol.
-    # We should try to sample in the middle of the plateau!!
-    # FIXME until we figure out how to do this, just offset by cp_length/2
-    offset = cp_length/2 #cp_length/2
+        # get the magnitude #
+        self.corrmag = gr.complex_to_mag_squared()
 
-    # nco(t) = P_d_angle(t-offset) sampled at peak_detect(t)
-    # modulate input(t - fft_length) by nco(t)
-    # signal to sample input(t) at t-offset
-    #
-    # We can't delay by < 0 so instead:
-    # input is delayed by fft_length
-    # P_d_angle is delayed by offset
-    # signal to sample is delayed by fft_length - offset
-    #
-    phi = gr.sample_and_hold_ff()
-    self.connect(peak_detect, (phi,1))
-    self.connect(P_d_angle, gr.delay(gr.sizeof_float, offset), (phi,0))
-    #self.connect(P_d_angle, matched_filter2, (phi,0)) # why isn't this better?!?
+        self.f2b = gr.float_to_char()
+        self.slice = gr.threshold_ff(threshold, threshold, 0, fft_length)
+        self.connect(self, self.crosscorr_filter, self.corrmag, self.slice, self.f2b, (phi, 1))
+	self.connect(P_d_angle, (phi,0))
+	self.connect(self.f2b, (self,2))                                # out - timing
+	self.connect(self, gr.delay(gr.sizeof_gr_complex, (fft_length)), (self,0))
 
-    # FIXME: we add fft_length delay so that the preamble is nco corrected too
-    # BUT is this buffering worth it? consider implementing sync as a proper block
+        # some debug dump #
+        self.connect(self.corrmag, gr.file_sink(gr.sizeof_float, "ofdm_corrmag.dat"))
+        self.connect(self.f2b, gr.file_sink(gr.sizeof_char, "ofdm_f2b.dat"))
+    else: 
+        # Get the power of the input signal to normalize the output of the correlation
+        R_d = gr.moving_average_ff(window, 1.0)
+	self.connect(self, gr.complex_to_mag_squared(), R_d)
+	R_d_squared = gr.multiply_ff() # this is retarded
+	self.connect(R_d, (R_d_squared, 0))
+	self.connect(R_d, (R_d_squared, 1))
+	M_d = gr.divide_ff()
+	self.connect(P_d, gr.complex_to_mag_squared(), (M_d, 0))
+	self.connect(R_d_squared, (M_d, 1))
 
-    # delay the input signal to follow the frequency offset signal
-    self.connect(self, gr.delay(gr.sizeof_gr_complex, (fft_length+offset)), (self,0))
+	# Now we need to detect peak of M_d
+	matched_filter = gr.moving_average_ff(cp_length, 1.0/cp_length)
+	peak_detect = gr.peak_detector_fb(0.25, 0.25, 30, 0.001)
+	self.connect(M_d, matched_filter, gr.add_const_ff(-1), peak_detect)
+        offset = cp_length/2 #cp_length/2
+        self.connect(peak_detect, (phi,1))
+	self.connect(peak_detect, (self,2))
+        self.connect(P_d_angle, gr.delay(gr.sizeof_float, offset), (phi,0))
+        self.connect(self, gr.delay(gr.sizeof_gr_complex, (fft_length+offset)), (self,0))	# delay the input to follow the freq offset
+	self.connect(peak_detect, gr.delay(gr.sizeof_char, (fft_length+offset)), (self,2))
+	self.connect(peak_detect, gr.file_sink(gr.sizeof_char, "sync-peaks_b.dat"))
+	self.connect(matched_filter, gr.file_sink(gr.sizeof_float, "sync-mf.dat"))
+
     self.connect(phi, (self,1))
-    self.connect(peak_detect, (self,2))
-
-    self.connect(peak_detect, gr.file_sink(gr.sizeof_char, "sync-peaks_b.dat"))
-    self.connect(matched_filter, gr.file_sink(gr.sizeof_float, "sync-mf.dat"))
 
     if logging:
       self.connect(matched_filter, gr.file_sink(gr.sizeof_float, "sync-mf.dat"))

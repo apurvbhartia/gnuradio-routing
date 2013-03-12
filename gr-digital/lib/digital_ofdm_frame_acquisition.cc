@@ -97,17 +97,16 @@ digital_ofdm_frame_acquisition::digital_ofdm_frame_acquisition (unsigned occupie
   d_hestimate = (gr_complex*) malloc(sizeof(gr_complex) * d_occupied_carriers);
   memset(d_hestimate, 0, sizeof(gr_complex) * d_occupied_carriers);
 
+//raw	
+#if 0
   const std::vector<gr_complex> &first = d_known_symbol[0];
-
   for(unsigned i = (pad() & 1); i < d_occupied_carriers-2; i+= 2) {
     // NOTE: only even frequencies matter
     // check pad to figure out which are odd
     d_known_diff[i] = first[i] * conj(first[i+2]);
     d_known_norm += norm(d_known_diff[i]);
   }
-
-
-#if 0
+#else
   d_symbol_phase_diff.resize(d_fft_length);
   d_known_phase_diff.resize(d_occupied_carriers);
   unsigned int i = 0, j = 0;
@@ -153,7 +152,7 @@ digital_ofdm_frame_acquisition::compensate() const {
 float
 digital_ofdm_frame_acquisition::correlate(const gr_complex *symbol, int zeros_on_left)
 {
-#if 0
+#if 1 
   unsigned int i,j;
   
   std::fill(d_symbol_phase_diff.begin(), d_symbol_phase_diff.end(), 0);
@@ -181,10 +180,8 @@ digital_ofdm_frame_acquisition::correlate(const gr_complex *symbol, int zeros_on
   int d_old = d_coarse_freq;
   d_coarse_freq = 0; //hack apurv++
   printf("old: %d, new: %d\n", d_old, d_coarse_freq); fflush(stdout);
-#endif
-
 // raw
-#if 1 
+#else
   for(unsigned i = 0; i < d_fft_length-2; i++) {
     d_symbol_diff[i] = conj(symbol[i]) * symbol[i+2];
   }
@@ -224,7 +221,7 @@ digital_ofdm_frame_acquisition::calculate_equalizer(const gr_complex *symbol, in
   unsigned int i=0;
   const std::vector<gr_complex> &known_symbol = d_known_symbol[d_cur_symbol];
   gr_complex comp = coarse_freq_comp(d_coarse_freq, d_cur_symbol);
-  printf("calculate_equalizer, cur_symbol: %d, comp (%f, %f)\n", d_cur_symbol, comp.real(), comp.imag()); fflush(stdout);
+  //printf("calculate_equalizer, cur_symbol: %d, comp (%f, %f)\n", d_cur_symbol, comp.real(), comp.imag()); fflush(stdout);
  
   if(d_cur_symbol == 0) {
      // Set first tap of equalizer
@@ -253,7 +250,7 @@ digital_ofdm_frame_acquisition::calculate_equalizer(const gr_complex *symbol, in
     }
   }
 
-  if(VERBOSE || 1) {
+  if(VERBOSE) {
     fprintf(stderr, "Equalizer setting:\n");
     for(i = 0; i < d_occupied_carriers; i++) {
       gr_complex sym = coarse_freq_comp(d_coarse_freq,d_cur_symbol)*symbol[i+zeros_on_left+d_coarse_freq];
@@ -352,7 +349,7 @@ digital_ofdm_frame_acquisition::general_work(int noutput_items,
       hout = (gr_complex *) output_items[2];
 
 // copied from raw version // 
-#if 1
+#if 0
   int ninput = ninput_items[0];
   int nproduced = 0;
   int nconsumed = 0;
@@ -367,7 +364,7 @@ digital_ofdm_frame_acquisition::general_work(int noutput_items,
     if(*signal_in) {
        corr = correlate(symbol, zeros_on_left);
        //printf("corr: %f\n", corr); fflush(stdout);
-       newframe = (corr > 0.5f);
+       newframe = (corr > 0.9f);
        std::cerr << "correlation = " << corr << std::endl;
        if(newframe) {
           std::cerr << "correlation = " << corr << " " << "coarse_freq: " << d_coarse_freq << std::endl;

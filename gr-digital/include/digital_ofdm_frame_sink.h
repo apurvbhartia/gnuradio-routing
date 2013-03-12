@@ -376,7 +376,7 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
 			   int exp_size, int fec_n, int fec_k);
 
  private:
-  enum state_t {STATE_SYNC_SEARCH, STATE_HAVE_SYNC, STATE_HAVE_NULL, STATE_HAVE_TRAINING, STATE_HAVE_HEADER};
+  enum state_t {STATE_SYNC_SEARCH, STATE_HAVE_SYNC, STATE_HAVE_NULL, STATE_HAVE_TRAINING, STATE_HAVE_HEADER, STATE_ABSENT_SENDER};
 
   //static const int MAX_PKT_LEN    = 4096;
 
@@ -438,7 +438,7 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
 
   void enter_search();
   void enter_have_sync();
-  void enter_have_header();
+  void enter_have_header(FlowInfo*);
   
   bool header_ok();
   
@@ -480,7 +480,7 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
   unsigned char d_header_bytes[HEADERBYTELEN]; 
  
   unsigned int d_batch_number;
-  unsigned int d_nsenders;
+  unsigned int d_nsenders, d_pending_senders;
   unsigned int d_pkt_num;
 
   NodeId d_id;
@@ -542,7 +542,7 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
   /* pilots */
   void assign_subcarriers();
   void fill_all_carriers_map();
-  void equalize_interpolate_dfe(const gr_complex *in, gr_complex *out);
+  void equalize_interpolate_dfe(const gr_complex *in, gr_complex *out, gr_complex*);
 
   /* to send the ACK on the backend ethernet */
   void send_ack(bool tx_ack, FlowInfo *flowInfo);
@@ -595,15 +595,23 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
  NetCoder* getNetCoder(FlowId, int);
  bool decodePacket(std::string encoded_msg, FlowInfo *fInfo);
  void makePacket_PRO(std::string, FlowInfo*);
+ void process_have_sync(gr_complex*, gr_complex*);
 
  // ---------------------------------- CF ----------------------------------- //
- int d_sender_index;
+ int d_sender_index, d_null_symbols;
  CompositeLinkVector d_compositeLinkVector;
 
  CompositeLink* getCompositeLink(LinkId);
  void populateCompositeLinkInfo_CF();
  bool shouldProcess_CF(FlowInfo*);
  void makePacket_CF(FlowInfo *fInfo);
+ void save_hestimates_CF(FlowInfo*);
+
+ unsigned int demap_CF_data(gr_complex *in, unsigned char *out);
+ unsigned int d_lead_sender;
+ bool d_joint_rx;
+ void decode_alamouti(FlowInfo*);
+ void equalizePilot(gr_complex*, FlowInfo*);
 
  // --------------------------------- CF ends ------------------------------- //
 

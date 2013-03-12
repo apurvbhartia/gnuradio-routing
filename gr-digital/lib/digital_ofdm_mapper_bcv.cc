@@ -157,6 +157,8 @@ digital_ofdm_mapper_bcv::digital_ofdm_mapper_bcv (const std::vector<gr_complex> 
     create_scheduler_sock();
     d_request_id = 0;
   }
+
+  d_pktInfo.symbols = NULL;			// used only for CF+alamouti //
 }
 
 digital_ofdm_mapper_bcv::~digital_ofdm_mapper_bcv(void)
@@ -341,7 +343,7 @@ digital_ofdm_mapper_bcv::work(int noutput_items,
   }
 
   if(d_modulated) {
-     if(d_proto == SPP || d_proto == CF)
+     if(d_proto == SPP)
         make_packet_SPP(flowInfo);				// blocking if no msg to send //
      else if(d_proto == PRO) {
 	make_packet_PRO_source(flowInfo);
@@ -365,6 +367,7 @@ digital_ofdm_mapper_bcv::work(int noutput_items,
 void
 digital_ofdm_mapper_bcv::make_packet_SPP(FlowInfo *flowInfo)
 {
+  assert((d_proto==CF && d_source) || (d_proto==SPP));
   assert(d_modulated);
   assert(d_batch_size == 1);
   // if last batch was acked, then dequeue a fresh one //
@@ -389,6 +392,7 @@ digital_ofdm_mapper_bcv::make_packet_SPP(FlowInfo *flowInfo)
   }
   else {
      // retransmission! //
+     makeHeader(flowInfo);
      assert(flowInfo->last_batch_acked < flowInfo->active_batch);
      printf("retransmit batch: %d, last_batch_acked: %d, pkts_sent: %d\n", 
 		flowInfo->active_batch, flowInfo->last_batch_acked, flowInfo->pkts_fwded); fflush(stdout);
@@ -431,8 +435,10 @@ digital_ofdm_mapper_bcv::modulate_and_send(int noutput_items,
      memset(cdd, 0, sizeof(short));
   }
   cdd[0] = 0;
-  if(!flowInfo->isLead)
-     cdd[0] = 3;
+#if 0
+  if(!flowInfo->isLead || 1)
+     cdd[0] = 2;
+#endif
   /* end */
 
   /* optional - for out timing signal required only for debugging */
@@ -443,6 +449,11 @@ digital_ofdm_mapper_bcv::modulate_and_send(int noutput_items,
   }
   /* end */
 
+#if 1
+  if(d_proto == CF && flowInfo->num_tx > 1 && !flowInfo->isLead && d_null_symbol_cnt < (d_preamble.size()+d_num_hdr_symbols)) {
+     d_null_symbol_cnt++;	
+  } else
+#endif
   if(d_preambles_sent < d_preamble.size()) {
      generatePreamble(out);
      d_preambles_sent++;
@@ -453,41 +464,47 @@ digital_ofdm_mapper_bcv::modulate_and_send(int noutput_items,
       generateOFDMSymbolHeader(out); 					// send the header symbols out first //
       tx_pilot = true;
   }
-#if 0
-  else if(flowInfo->isLead && d_null_symbol_cnt < (d_preamble.size()+d_num_hdr_symbols)) {
+#if 1
+  else if(d_proto == CF && flowInfo->num_tx > 1 && flowInfo->isLead && d_null_symbol_cnt < (d_preamble.size()+d_num_hdr_symbols)) {
       d_null_symbol_cnt++;
   }
 #endif
-  else if(!d_send_null) {
+  else if(d_ofdm_symbol_index < d_num_ofdm_symbols) {
 
+      tx_pilot = true;
       assert(d_pending_flag == 0);
 
 	// send the data symbols now //
-      if(d_proto == CF && !d_source) 
+      if(d_proto == CF && flowInfo->num_tx > 1) {
+	 assert(d_num_ofdm_symbols%2 == 0);
+	 generateOFDMSymbolData_alamouti(out, flowInfo);
+	 if(flowInfo->isLead) tx_pilot = false; 
+      } 
+      else if(d_proto == CF && !d_source)
 	 copyOFDMSymbolData_CF(out);
       else 
 	 generateOFDMSymbolData(out); 
 
  	// offline, timekeeping, etc //
-      assert(d_ofdm_symbol_index < d_num_ofdm_symbols);
       d_ofdm_symbol_index++;
-
-      tx_pilot = true;
   }
   else {
       // send a NULL symbol at the end //
        int ii=0;
+#if 0
        while(ii < d_data_carriers.size()) {   // finish filling out the symbol
          out[d_data_carriers[ii]] = d_data_constellation[randsym()];
          ii++;
       }
+#endif
       d_pending_flag = 2;
       flowInfo->pkts_fwded++;
       assert(d_ofdm_symbol_index == d_num_ofdm_symbols);
       d_send_null = false;
       d_modulated = true;
       flowInfo->pkts_fwded++;
-      if(d_tdma && (flowInfo->isLead)) send_scheduler_msg(REQUEST_COMPLETE_MSG, flowInfo->flowId);
+      if(d_tdma && ((d_proto==CF && !d_source && flowInfo->isLead) || (d_proto==CF && d_source) || (d_proto != CF))) 
+	 send_scheduler_msg(REQUEST_COMPLETE_MSG, flowInfo->flowId);
       d_request_id++;
   }
 
@@ -665,12 +682,13 @@ digital_ofdm_mapper_bcv::generateOFDMSymbolData(gr_complex* out)
       d_resid = 0;
     }
 
-#if 0
+   
+    if(i<d_data_carriers.size()) printf("finish filling out the symbol.. \n");
     while(i < d_data_carriers.size()) {   // finish filling out the symbol
-      out[d_data_carriers[i]] = d_constellation[randsym()];
+      out[d_data_carriers[i]] = d_data_constellation[0];
+      //printf("out: (%.2f, %.2f)\n", out[d_data_carriers[i]].real(), out[d_data_carriers[i]].imag());
       i++;
     }
-#endif
 
     //printf("complete pkt modulated\n"); fflush(stdout);
     //d_modulated = true;		// complete msg has been demodulated //
@@ -793,7 +811,11 @@ digital_ofdm_mapper_bcv::makeHeader(FlowInfo *fInfo)
       d_header.pkt_type = DATA_TYPE;
       d_header.pkt_num = d_pkt_num;			// unique number across all flows
       d_header.link_id = '0';
+      d_header.lead_sender = int(fInfo->isLead) + '0';
+      d_header.nsenders = fInfo->num_tx+'0';
 
+      printf("lead_sender: %c, nsenders: %c\n", d_header.lead_sender, d_header.nsenders); fflush(stdout);     
+ 	
       if(d_proto == PRO) 
 	 memcpy(d_header.coeffs, fInfo->coeffs, d_batch_size);
    }
@@ -818,6 +840,8 @@ digital_ofdm_mapper_bcv::makeHeader(FlowInfo *fInfo)
 	    d_header.prev_hop_id = fInfo->leadId;		// useless for CF, only link matters!
 	    d_header.packetlen = fInfo->packetlen;
 	    d_header.link_id = fInfo->nextLinkId;
+	    d_header.pkt_num = fInfo->seqNo;			// in case of CF, just use the unique seqNo, which will be consistent even for multiple tx
+	    d_header.nsenders = fInfo->num_tx + '0';
             printf("(MAPPER) makeHeader batch: %d, pkt: %d, len: %d, src: %c, dst: %c, flow: %c, next_hop: %c, nextLink: %c\n",           
                     fInfo->active_batch, d_pkt_num, fInfo->packetlen, fInfo->src, fInfo->dst, fInfo->flowId,         
                     fInfo->nextHopId, fInfo->nextLinkId);
@@ -825,6 +849,10 @@ digital_ofdm_mapper_bcv::makeHeader(FlowInfo *fInfo)
 	 }
       }
    }
+
+   printf("(MAPPER), makeHeader, batch:% d, pkt: %d, len: %d, src: %d, dst: %d, flow: %d, next_hop: %d, nextLink: %c\n", 
+	d_header.batch_number, d_header.pkt_num, d_header.packetlen, d_header.src_id, d_header.dst_id, d_header.flow_id, 
+	d_header.next_hop_id, d_header.link_id); fflush(stdout);
 
    d_last_pkt_time = d_out_pkt_time;  
 
@@ -894,23 +922,25 @@ digital_ofdm_mapper_bcv::add_crc_and_fec(gr_message_sptr msg) {
    }
    printf("\n");
 
+   int pad_len = 0;
    if(fec_N == 0 && fec_K == 0) {
-      len += getPadBytes(len); 
-      printf("padded_len: %d\n", len); fflush(stdout);
-      d_msg = gr_make_message(0, 0, 0, len);
-      //memset(d_msg->msg(), 0, len);
+      pad_len = getPadBytes(len); 
+      printf("padded_len: %d\n", pad_len); fflush(stdout);
+      d_msg = gr_make_message(0, 0, 0, len+pad_len);
       memcpy(d_msg->msg(), msg_data, len);
+      memcpy(d_msg->msg()+len, msg_data, pad_len);		// just treat them as random bytes!
    }
    else {
       std::string coded_msg = digital_tx_wrapper(std::string((const char*) msg_data, len), fec_N, fec_K, 0);
       len = coded_msg.length();
-      len += getPadBytes(len);
-      d_msg = gr_make_message(0, 0, 0, len);
-      memset(d_msg->msg(), 0, len);
+      pad_len = getPadBytes(len);
+      printf("padded_len: %d\n", pad_len); fflush(stdout);
+      d_msg = gr_make_message(0, 0, 0, len+pad_len);
       memcpy(d_msg->msg(), coded_msg.data(), len);
+      memcpy(d_msg->msg()+len, coded_msg.data(), pad_len);	// just treat them as random bytes
    }
-   printf("33\n"); fflush(stdout);
 
+   len += pad_len;
    printf("len:%d\n", len); fflush(stdout);
    interleave(d_msg->msg(), len);
    whiten(d_msg->msg(), len);
@@ -1318,10 +1348,18 @@ digital_ofdm_mapper_bcv::check_scheduler_reply(SchedulerMsg& reply) {
 
    if(d_proto == CF) {
       FlowInfo *fInfo = getFlowInfo(false, reply.flow);
-      return (reply.request_id == d_request_id && ((reply.nodeId == d_id) || (reply.linkId == fInfo->nextLinkId))); 
+      if(reply.nodeId == d_id) 
+	 return true;
+      else if(reply.linkId == fInfo->nextLinkId) {
+	 for(int i = 0; i < reply.num_tx; i++) {
+	     if(reply.senders[i] == d_id)
+	        return true;
+	 }
+      }
+      return false;
    }
    else 
-      return (reply.request_id == d_request_id && (reply.nodeId == d_id));
+      return (reply.nodeId == d_id);
 }
 
 inline void
@@ -1859,7 +1897,7 @@ digital_ofdm_mapper_bcv::work_forwarder_CF(int noutput_items,
 	 }
          break;
       } // while
-      prepare_packet_CF_fwd(reply.lead_sender);
+      prepare_packet_CF_fwd(reply);
    }
 
    /* the payload is already modulated, and only the header needs to be modulated */
@@ -1870,7 +1908,7 @@ digital_ofdm_mapper_bcv::work_forwarder_CF(int noutput_items,
 /* just prepare to fwd a CF_packet - the param is passed to ensure only the lead replies 
    to the scheduler with the COMPLETE message */
 void
-digital_ofdm_mapper_bcv::prepare_packet_CF_fwd(NodeId leadId)
+digital_ofdm_mapper_bcv::prepare_packet_CF_fwd(SchedulerMsg reply)
 {
    /* get the flow that needs to be serviced */
    assert(d_flow_q_CF.size() >= 1);
@@ -1881,8 +1919,10 @@ digital_ofdm_mapper_bcv::prepare_packet_CF_fwd(NodeId leadId)
    assert(d_flow >= 0);
    FlowInfo *fInfo = getFlowInfo(false, d_flow);
    fInfo->nextLinkId = nextLinkId;
-   fInfo->isLead = (leadId == d_id)?true:false;
-   fInfo->leadId = leadId;
+   fInfo->isLead = (reply.lead_sender == d_id)?true:false;
+   fInfo->leadId = reply.lead_sender;
+   fInfo->seqNo = reply.seqNo;
+   fInfo->num_tx = reply.num_tx;
    d_flow_q_CF.erase(d_flow_q_CF.begin());
 
    printf("prepare_packet_CF_fwd -- flow: %c, nextLinkId: %c, isLead: %d\n", d_flow, nextLinkId, fInfo->isLead); fflush(stdout);
@@ -2140,6 +2180,9 @@ digital_ofdm_mapper_bcv::work_CF(int noutput_items,
         }
      }
      make_time_tag(uhd::time_spec_t(0, 0), false);
+
+     if(flowInfo->num_tx > 1) 
+        generateModulatedData_CF();				// generates all modulated data at once! //
   }
 
   return modulate_and_send(noutput_items, input_items, output_items, flowInfo);
@@ -2321,4 +2364,56 @@ digital_ofdm_mapper_bcv::interleave(unsigned char *data, int len) {
       data[k++] = (unsigned char) s_bits.to_ulong();
    }
    free(out);
+}
+
+/* symbols have been pre-modulated, only ensure 'out' is filled using alamouti codes
+
+ 	         T1    T2
+   Sender1:: 	 s1   -s2*
+   ----------------------
+   Sender2::	 s2    s1*
+*/
+inline void
+digital_ofdm_mapper_bcv::generateOFDMSymbolData_alamouti(gr_complex* out, FlowInfo *fInfo) {
+  gr_complex *symbols = d_pktInfo.symbols;
+  int offset = d_ofdm_symbol_index*d_fft_length;
+
+  // if the lead sender //
+  if(fInfo->isLead) {
+     for(int i=0; i<d_data_carriers.size(); i++) {
+        if(d_ofdm_symbol_index%2==0)
+            out[d_data_carriers[i]] = symbols[offset+d_data_carriers[i]];
+         else
+	    out[d_data_carriers[i]] = -conj(symbols[offset+d_data_carriers[i]]);
+     }
+  }
+  else {
+     // if not the lead //
+     for(int i=0; i<d_data_carriers.size(); i++) {
+         if(d_ofdm_symbol_index%2==0)
+            out[d_data_carriers[i]] = symbols[offset+d_fft_length+d_data_carriers[i]];
+         else
+	    out[d_data_carriers[i]] = conj(symbols[offset-d_fft_length+d_data_carriers[i]]);
+     }
+  }
+}
+
+/* used when alamouti codes are used, pre-generates all the ofdm symbols at once, 
+   so in modulate_and_send, the alamouti codes can be used on these symbols */
+inline void
+digital_ofdm_mapper_bcv::generateModulatedData_CF() {
+  bool extra_symbol = (d_num_ofdm_symbols%2==0)?false:true;		// add 1 OFDM symbol, if odd to work with alamouti (2x1)
+  if(extra_symbol) 
+     d_num_ofdm_symbols++;
+
+  if(d_pktInfo.symbols == NULL) {
+     d_pktInfo.symbols = (gr_complex*) malloc(sizeof(gr_complex)*d_num_ofdm_symbols*d_fft_length);
+  }
+
+  memset(d_pktInfo.symbols, 0, sizeof(gr_complex)*d_num_ofdm_symbols*d_fft_length);
+  for(int o=0; o<d_num_ofdm_symbols; o++) {
+      generateOFDMSymbolData(&(d_pktInfo.symbols[o*d_fft_length]));
+  }
+  d_send_null = false;
+  printf("generateModulatedData_CF.. extra: %d, d_num_ofdm_symbols: %d\n", extra_symbol, d_num_ofdm_symbols); fflush(stdout);
 }

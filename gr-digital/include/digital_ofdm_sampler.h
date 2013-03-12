@@ -87,6 +87,7 @@ class DIGITAL_API digital_ofdm_sampler : public gr_block
   float d_phase;
 
   unsigned int d_num_preambles;
+  uint64_t d_prev_trigger_pos;
 };
 
 #endif

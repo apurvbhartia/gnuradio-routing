@@ -93,7 +93,7 @@ typedef struct multihop_hdr_type {
   unsigned char nsenders;
 
   // 1
-  unsigned char lead_sender;
+  unsigned char lead_sender;			   // 1: if lead sender, 0: otherwise
 
   // 2 bytes
   unsigned char coeffs[MAX_BATCH_SIZE];		   // only used for PRO; empty (0) when not used
@@ -158,6 +158,9 @@ typedef struct flow_info_str {
   /* for cf */
   NodeId leadId;
   bool isLead;  
+  short seqNo;
+  gr_complex hestimates[MAX_SENDERS][MAX_OCCUPIED_CARRIERS];
+  short num_tx;
 } FlowInfo;
 
 typedef std::vector<FlowInfo*> FlowInfoVector;

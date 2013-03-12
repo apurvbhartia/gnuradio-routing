@@ -93,14 +93,114 @@ digital_ofdm_frame_sink::enter_have_sync()
 }
 
 inline void
-digital_ofdm_frame_sink::enter_have_header() {
+digital_ofdm_frame_sink::process_have_sync(gr_complex *in, gr_complex *in_estimates) {
+   if(d_preamble_cnt < d_preamble.size()) {
+      if(d_preamble_cnt == d_preamble.size()-1) {
+        /* last preamble - calculate SNR */
+        memcpy(d_in_estimates, in_estimates, sizeof(gr_complex) * d_occupied_carriers);
+#if LOG_H
+        int count = ftell(d_fp_hestimates);
+        count = fwrite_unlocked(in_estimates, sizeof(gr_complex), d_occupied_carriers, d_fp_hestimates);
+#endif
+        equalizeSymbols(&in[0], d_in_estimates);
+        calculate_snr(in);
+      }
+      d_preamble_cnt++;
+      return;
+   }
+
+   equalizeSymbols(&in[0], d_in_estimates);
+
+   // only demod after getting the preamble signal // 
+   unsigned int bytes = demap(&in[0], d_bytes_out, true);
+   d_hdr_ofdm_index++;
+
+   /* add the demodulated bytes to header_bytes */
+   memcpy(d_header_bytes+d_hdr_byte_offset, d_bytes_out, bytes);
+   d_hdr_byte_offset += bytes;
+
+   FlowInfo *flowInfo = getFlowInfo(false, d_flow);
+   /* header processing */
+   if(d_hdr_byte_offset == HEADERBYTELEN) {
+      if(header_ok()) {                                                // full header received
+         printf("HEADER OK prev_hop: %d pkt_num: %d batch_num: %d dst_id: %d\n", d_header.prev_hop_id, d_header.pkt_num, d_header.batch_number, d_header.dst_id); fflush(stdout);
+	 extract_header();                                             // fills local fields with header info
+
+	 if(d_lead_sender || d_proto != CF) {
+	    if(!shouldProcess(flowInfo)) {
+               enter_search();
+               return;
+            }	
+	
+	    prepareForNewBatch(flowInfo);
+	    d_pending_senders = d_nsenders;
+	    if(d_pending_senders > 1) {
+	       d_joint_rx = true;
+	    }
+	 }
+	
+	 if(d_joint_rx) {
+	    assert(d_proto == CF);
+	    save_hestimates_CF(flowInfo);
+  	 }
+
+	 d_pending_senders--;
+	 if(d_pending_senders == 0 || d_proto != CF) {
+	    enter_have_header(flowInfo);
+	 }
+	 else {
+	    enter_search(); 
+	    return;
+	 }
+      }
+      else {
+         printf("HEADER NOT OK --\n"); fflush(stdout);
+	 
+#if 0
+	 if(d_joint_rx) {
+	    save_hestimates_CF(flowInfo);
+	    d_pending_senders--;
+	    if(d_pending_senders == 0) {
+	       enter_have_header();
+	       return;
+	    }
+	    else {
+	       enter_search(); 
+	       return;
+	    }
+	 }
+#endif
+         enter_search();                                               // bad header
+         reset_demapper();
+      }
+   }
+}
+
+inline void
+digital_ofdm_frame_sink::save_hestimates_CF(FlowInfo *fInfo) {
+   int sender_index = d_nsenders - d_pending_senders;
+   printf("save_hestimates_CF, sender_index: %d\n", sender_index); fflush(stdout);
+   gr_complex *hestimates = fInfo->hestimates[sender_index];
+   memcpy(hestimates, d_in_estimates, sizeof(gr_complex)*d_occupied_carriers); 
+}
+
+inline void
+digital_ofdm_frame_sink::enter_have_header(FlowInfo *fInfo) {
   assert(d_fwd || d_dst);
   d_state = STATE_HAVE_HEADER;
   d_curr_ofdm_symbol_index = 0;
   d_num_ofdm_symbols = ceil(((float) (d_packetlen * 8))/(d_data_carriers.size() * d_data_nbits));
-  printf("d_num_ofdm_symbols: %d, actual sc size: %d, d_data_nbits: %d, d_packetlen: %d\n", d_num_ofdm_symbols, d_data_carriers.size(), d_data_nbits, d_packetlen);
+ 
+  bool extra_symbol = false;
+  if(d_proto == CF && fInfo->num_tx > 1) {
+     extra_symbol = (d_num_ofdm_symbols%2==0)?false:true;
+     if(extra_symbol)
+	d_num_ofdm_symbols++;
+  } 
+
+  printf("d_num_ofdm_symbols: %d, extra: %d, actual sc size: %d, d_data_nbits: %d, d_packetlen: %d\n", d_num_ofdm_symbols, extra_symbol, d_data_carriers.size(), d_data_nbits, d_packetlen);
   fflush(stdout);
-   assert(d_num_ofdm_symbols < MAX_OFDM_SYMBOLS);
+  assert(d_num_ofdm_symbols < MAX_OFDM_SYMBOLS);
 
   d_pktInfo = createPktInfo();
   d_pktInfo->symbols = (gr_complex*) malloc(sizeof(gr_complex) * d_num_ofdm_symbols * d_occupied_carriers);
@@ -115,6 +215,9 @@ digital_ofdm_frame_sink::reset_demapper() {
   d_byte_offset = 0;
   d_partial_byte = 0;
   d_sender_index = -1;
+
+  d_pending_senders = 0; d_nsenders = 0;
+  d_joint_rx = false;
 
   fill(d_dfe.begin(), d_dfe.end(), gr_complex(1.0,0.0));
 
@@ -175,11 +278,12 @@ digital_ofdm_frame_sink::extract_header()
   }
 
   if(d_proto == CF) {
-     d_nsenders = d_header.nsenders;
-     //d_lead_sender = d_header.lead_sender;
+     d_nsenders = d_header.nsenders-'0';
+     d_lead_sender = d_header.lead_sender-'0';
+     printf("d_nsenders: %d, d_lead_sender: %d\n", d_nsenders, d_lead_sender); fflush(stdout);
   }  
 
-  printf("prev_hop: %c, src: %c, dst: %c\n", d_prev_hop_id, d_src_id, d_dst_id); fflush(stdout);
+  printf("prev_hop: %c, src: %c, dst: %c n_senders: %d lead_sender: %d\n", d_prev_hop_id, d_src_id, d_dst_id, d_nsenders, d_lead_sender); fflush(stdout);
 }
 
 unsigned char digital_ofdm_frame_sink::slicer(const gr_complex x, const std::vector<gr_complex> &sym_position,
@@ -198,14 +302,15 @@ unsigned char digital_ofdm_frame_sink::slicer(const gr_complex x, const std::vec
     }
   }
 #if 0
-  gr_complex closest = d_sym_position[min_index];
-  printf("x: (%f, %f), closest: (%f, %f), evm: (%f, %f)\n", x.real(), x.imag(), closest.real(), closest.imag(), min_euclid_dist); fflush(stdout);
+  gr_complex closest = sym_position[min_index];
+  printf("x: (%.2f, %.2f), closest: (%.2f, %.2f), evm: (%.2f, %.2f)\n", x.real(), x.imag(), closest.real(), closest.imag(), min_euclid_dist); fflush(stdout);
 #endif
   return sym_value_out[min_index];
 }
 
-/* uses pilots - from rawofdm */
-void digital_ofdm_frame_sink::equalize_interpolate_dfe(const gr_complex *in, gr_complex *out) 
+/* uses pilots - from rawofdm -- optionally returns if needed */
+inline void
+digital_ofdm_frame_sink::equalize_interpolate_dfe(const gr_complex *in, gr_complex *out, gr_complex *factor) 
 {
   gr_complex phase_error = 0.0;
 
@@ -215,6 +320,8 @@ void digital_ofdm_frame_sink::equalize_interpolate_dfe(const gr_complex *in, gr_
     cur_pilot = -cur_pilot;
     int di = d_pilot_carriers[i];
     phase_error += (in[di] * conj(pilot_sym));
+    printf("in: (%f, %f), pilot: (%f, %f)\n", in[di].real(), in[di].imag(), pilot_sym.real(), pilot_sym.imag());
+    fflush(stdout);
   } 
 
   int sender_index = d_sender_index+1;					// d_sender_index is incremented post header_ok() [CF code only] //
@@ -265,20 +372,10 @@ void digital_ofdm_frame_sink::equalize_interpolate_dfe(const gr_complex *in, gr_
       float alpha = float(di - pilot_carrier_lo) * denom;		// (x - x_a)/(x_b - x_a)
       gr_complex dfe = pilot_dfe_lo + alpha * (pilot_dfe_hi - pilot_dfe_lo);	// y = y_a + (y_b - y_a) * (x - x_a)/(x_b - x_a) 
       gr_complex sigeq = in[di] * carrier * dfe;
+      if(factor != NULL)
+         factor[i] = gr_expj(angle);
       out[i] = sigeq;
   }
-
-#if 0
-  /* for the slope of the angle, to be used if a gap exists between the header and the data for this sender */
-  if(d_hdr_ofdm_index == 0) {
-      d_start_angle[sender_index] = angle;
-  }
-  else if(d_hdr_ofdm_index == d_num_hdr_ofdm_symbols-1) {
-      d_end_angle[sender_index] = angle;
-      d_slope_angle[sender_index] = (d_end_angle[sender_index] - d_start_angle[sender_index])/((float) d_hdr_ofdm_index);
-      printf("(after header) sender index: %d, d_phase: %f, d_freq: %f\n", sender_index, d_phase[sender_index], d_freq[sender_index]); fflush(stdout);
-  }
-#endif
 }
 
 // apurv++ comment: demaps an entire OFDM symbol in one go (with pilots) //
@@ -291,7 +388,7 @@ unsigned int digital_ofdm_frame_sink::demap(const gr_complex *in,
 
   gr_complex *rot_out = (gr_complex*) malloc(sizeof(gr_complex) * d_data_carriers.size());		// only the data carriers //
   memset(rot_out, 0, sizeof(gr_complex) * d_data_carriers.size());
-  equalize_interpolate_dfe(in, rot_out);
+  equalize_interpolate_dfe(in, rot_out, NULL);
 
 
   unsigned int i=0, bytes_produced=0;
@@ -599,84 +696,51 @@ digital_ofdm_frame_sink::work (int noutput_items,
     fprintf(stderr,">>> Entering state machine, d_state: %d\n", d_state);
 
   FlowInfo *flowInfo = NULL;
-  unsigned int bytes=0;
   unsigned int n_data_carriers = d_data_carriers.size();
   int count = 0;
   switch(d_state) {
 
   case STATE_SYNC_SEARCH:    // Look for flag indicating beginning of pkt
-    if (VERBOSE)
-      fprintf(stderr,"SYNC Search, noutput=%d\n", noutput_items);
-
-    if (sig[0]) {  // Found it, set up for header decode
-      enter_have_sync();
-      test_timestamp(1);
-      d_preamble_cnt++;
+    if(d_joint_rx && !sig[0]) {
+       d_null_symbols = 0;
+       d_state = STATE_ABSENT_SENDER;					// sender absent
+       break;
+    }
+	
+    if(sig[0]) {
+       enter_have_sync();
+       test_timestamp(1);
+       d_preamble_cnt++;
     }
     break;      // don't demodulate the preamble, so break!
 
   case STATE_HAVE_SYNC:
-    if(d_preamble_cnt < d_preamble.size()) {
-	if(d_preamble_cnt == d_preamble.size()-1) {
-	   /* last preamble - calculate SNR */
-	   memcpy(d_in_estimates, in_estimates, sizeof(gr_complex) * d_occupied_carriers);
-#if LOG_H
-           count = ftell(d_fp_hestimates);
-           count = fwrite_unlocked(in_estimates, sizeof(gr_complex), d_occupied_carriers, d_fp_hestimates);
-#endif
-
-	   equalizeSymbols(&in[0], d_in_estimates);
-	   calculate_snr(in);
-	}
-	d_preamble_cnt++;
-	break;
-    }
-
-    if (sig[0]) {
+    if(sig[0]) {
        printf("ERROR -- Found SYNC in HAVE_SYNC\n");
        reset_demapper();
        enter_search();
        break;
     }
-    equalizeSymbols(&in[0], d_in_estimates);
 
-    // only demod after getting the preamble signal // 
-    bytes = demap(&in[0], d_bytes_out, true);
-    d_hdr_ofdm_index++;
+    process_have_sync(in, in_estimates);
+    break;
 
-    /* add the demodulated bytes to header_bytes */
-    memcpy(d_header_bytes+d_hdr_byte_offset, d_bytes_out, bytes);
-    d_hdr_byte_offset += bytes;
-
-    //printf("hdrbytelen: %d, hdrdatalen: %d, d_hdr_byte_offset: %d, bytes: %d\n", HEADERBYTELEN, HEADERDATALEN, d_hdr_byte_offset, bytes); fflush(stdout);
-
-    /* header processing */
-
-    if (d_hdr_byte_offset == HEADERBYTELEN) {
-        if(header_ok()) {						 // full header received
-          printf("HEADER OK prev_hop: %d pkt_num: %d batch_num: %d dst_id: %d\n", d_header.prev_hop_id, d_header.pkt_num, d_header.batch_number, d_header.dst_id); fflush(stdout);
-          extract_header();						// fills local fields with header info
-	  flowInfo = getFlowInfo(false, d_flow);
-	
-	  if(!shouldProcess(flowInfo)) {
-	      enter_search();
-	      break;
-          }
-
-	  enter_have_header();
-	  prepareForNewBatch(flowInfo);
-        }
-        else {
-          printf("HEADER NOT OK --\n"); fflush(stdout);
-          enter_search();           					// bad header
-	  reset_demapper();
-        }
-    }
+  case STATE_ABSENT_SENDER:
+    d_null_symbols++;
+    flowInfo = getFlowInfo(false, d_flow);
+    assert(d_joint_rx && d_proto == CF);
+    if(d_null_symbols == (d_preamble.size()+d_num_hdr_ofdm_symbols)) {
+       d_pending_senders--;
+       if(d_pending_senders == 0) 
+	  enter_have_header(flowInfo);
+       else 
+	  enter_search();
+    }     
     break;
 
   case STATE_HAVE_HEADER:						// process the frame after header
     if (sig[0]) {
-        printf("ERROR -- Found SYNC in HAVE_HEADER, length of %d\n", d_packetlen);
+        printf("ERROR -- Found SYNC in HAVE_HEADER, d_curr_ofdm_symbol_index: %d, d_num_ofdm_symbols: %d\n", d_curr_ofdm_symbol_index, d_num_ofdm_symbols);
 	enter_search();
 	reset_demapper();
 	resetPktInfo(d_pktInfo);
@@ -688,7 +752,11 @@ digital_ofdm_frame_sink::work (int noutput_items,
 	assert(false);
     }
 
-    equalizeSymbols(&in[0], &d_in_estimates[0]);
+    if(d_nsenders == 1 || d_proto != CF) {
+       printf("equalize payload\n"); fflush(stdout);
+       equalizeSymbols(&in[0], &d_in_estimates[0]);
+    }
+   
     storePayload(&in[0]);
     d_curr_ofdm_symbol_index++;
 
@@ -716,6 +784,10 @@ digital_ofdm_frame_sink::work (int noutput_items,
 	  }
        }
        else if(d_proto == CF) {
+	  if(flowInfo->num_tx > 1) {
+	     decode_alamouti(flowInfo);
+	  }
+	
 	  if(d_dst) {
 	     bool tx_ack = demodulate_packet(decoded_msg, flowInfo);	
 	     send_ack(tx_ack, flowInfo);	
@@ -800,6 +872,79 @@ digital_ofdm_frame_sink::storePayload(gr_complex *in)
   memcpy(d_pktInfo->symbols + offset, in, sizeof(gr_complex) * d_occupied_carriers);
 }
 
+/* alamouti decoding, need to account for frequency offset as well. 
+   Current assumption is that the synchronizing transmitters use a MIMO cable, so the 
+   frequency offset is the same from both the transmitters */
+void
+digital_ofdm_frame_sink::decode_alamouti(FlowInfo *fInfo) {
+  printf("decode_alamouti\n"); fflush(stdout);
+  assert(d_proto == CF && fInfo->num_tx > 1);
+  gr_complex *in = d_pktInfo->symbols;
+
+  gr_complex rot_out[MAX_DATA_CARRIERS*2];			// decoding 2 OFDM symbols at a time //
+  gr_complex factor[MAX_DATA_CARRIERS];
+
+  gr_complex h[MAX_SENDERS][MAX_OCCUPIED_CARRIERS] = fInfo->hestimates;
+
+  gr_complex *out = (gr_complex*) malloc(sizeof(gr_complex)*d_occupied_carriers*d_num_ofdm_symbols);
+  memset(out, 0, sizeof(gr_complex)*d_occupied_carriers*d_num_ofdm_symbols);
+
+  printf("h values:: \n"); fflush(stdout);
+  for(int i=0; i<d_data_carriers.size(); i++) {
+      gr_complex h0 = gr_complex(1.0, 0.0)/h[0][d_data_carriers[i]];
+      gr_complex h1 = gr_complex(1.0, 0.0)/h[1][d_data_carriers[i]];
+      printf("sub: %d, h0 (%f, %f) h1(%f, %f)\n", i, h0.real(), h0.imag(), h1.real(), h1.imag());
+  }
+  printf("=====================================\n"); fflush(stdout);
+  printf("=====================================\n"); fflush(stdout);
+
+
+  for(int i=0; i<d_num_ofdm_symbols; i+=2) {
+
+      // first correct the data symbols by e^(2.pi.f.t) //
+      // the remaining correction (another e^(2.pi.f.t) needs to be applied on the 1st senders 'H' //
+      equalizePilot(in+(i*d_occupied_carriers), fInfo);
+      equalizePilot(in+((i+1)*d_occupied_carriers), fInfo);
+
+      equalize_interpolate_dfe(in+(i*d_occupied_carriers), rot_out, factor);				// correct by e^(2.pi.f.t)
+      equalize_interpolate_dfe(in+((i+1)*d_occupied_carriers), rot_out+d_data_carriers.size(), NULL);			// correct by e^(2.pi.f.(t+1))
+
+      for(int j=0; j<d_data_carriers.size(); j++) {
+	  int index = d_data_carriers[j];
+	  int offset1 = (i*d_occupied_carriers) + index;
+	  int offset2 = ((i+1)*d_occupied_carriers)+index;
+	  gr_complex h1 = (gr_complex(1.0, 0.0)/h[0][index]) * factor[j];
+	  gr_complex h2 = gr_complex(1.0, 0.0)/h[1][index];
+
+#if 0
+	  out[offset1] = (conj(h1)*in[offset1]) + ((h2)*conj(in[offset2]));
+	  out[offset2] = (conj(h2)*in[offset1]) - ((h1)*conj(in[offset2]));
+#else
+
+	  out[offset1] = (conj(h1)*rot_out[j]) + (h2*conj(rot_out[d_data_carriers.size()+j]));
+          out[offset2] = (conj(h2)*rot_out[j]) - (h1*conj(rot_out[d_data_carriers.size()+j]));
+#endif
+
+	  out[offset1] /= (norm(h1)+norm(h2));
+	  out[offset2] /= (norm(h1)+norm(h2));
+
+	  printf("o: %d, sub: %d, offset: %d, in: (%.2f, %.2f), out: (%.2f, %.2f) factor (%.2f) -- ", i, index, offset1, in[offset1].real(), in[offset1].imag(), out[offset1].real(), out[offset1].imag(), arg(factor[j]));
+	  printf("o: %d, sub: %d, offset: %d, in: (%.2f, %.2f), out: (%.2f, %.2f) \n", i+1, index, offset2, in[offset2].real(), in[offset2].imag(), out[offset2].real(), out[offset2].imag());
+      }
+  }
+
+  memcpy(in, out, sizeof(gr_complex)*d_occupied_carriers*d_num_ofdm_symbols);
+  free(out);
+}
+
+void
+digital_ofdm_frame_sink::equalizePilot(gr_complex *in, FlowInfo *fInfo) {
+  gr_complex h[MAX_SENDERS][MAX_OCCUPIED_CARRIERS] = fInfo->hestimates;
+  for(int i=0; i<d_pilot_carriers.size(); i++) {
+      in[d_pilot_carriers[i]] *= h[1][d_pilot_carriers[i]];
+  }
+}
+
 bool
 digital_ofdm_frame_sink::demodulate_packet(std::string& decoded_msg, FlowInfo *fInfo)
 {
@@ -818,7 +963,12 @@ digital_ofdm_frame_sink::demodulate_packet(std::string& decoded_msg, FlowInfo *f
       unsigned int offset = o * d_occupied_carriers;
 
       memset(bytes_out, 0, sizeof(unsigned char) * d_occupied_carriers);
-      unsigned int bytes_decoded = demap(&out_symbols[offset], bytes_out, false);
+      unsigned int bytes_decoded = 0;
+      if(fInfo->num_tx > 1)
+         bytes_decoded = demap_CF_data(&out_symbols[offset], bytes_out);
+      else
+         bytes_decoded = demap(&out_symbols[offset], bytes_out, false);
+
 
       unsigned int jj = 0;
       while(jj < bytes_decoded) {
@@ -841,7 +991,7 @@ digital_ofdm_frame_sink::demodulate_packet(std::string& decoded_msg, FlowInfo *f
 
   fInfo->total_pkts_rcvd++;
 
-  if(d_proto == SPP) {
+  if(d_proto == SPP || d_proto == CF) {
      if(crc_valid) {
         fInfo->num_pkts_correct++;
         printf("crc valid: %d\n", crc_valid); fflush(stdout); 
@@ -854,6 +1004,7 @@ digital_ofdm_frame_sink::demodulate_packet(std::string& decoded_msg, FlowInfo *f
   else if(d_proto == PRO) {
      printf("Flow: %c, Pkt OK: %d, Batch Id: %d\n", fInfo->flowId, crc_valid, fInfo->active_batch); fflush(stdout);
   }
+  printf("decoded:: "); fflush(stdout);
   print_msg(decoded_msg);  
   return crc_valid;
 }
@@ -885,7 +1036,6 @@ digital_ofdm_frame_sink::open_hestimates_log()
 */
 bool
 digital_ofdm_frame_sink::shouldProcess(FlowInfo *fInfo) {
-
   if(d_proto == CF) 
      return shouldProcess_CF(fInfo);
 
@@ -931,6 +1081,7 @@ digital_ofdm_frame_sink::prepareForNewBatch(FlowInfo *fInfo) {
   printf("prepareForNewBatch, batch: %d\n", d_header.batch_number); fflush(stdout);
   fInfo->active_batch = d_batch_number;
   fInfo->pkts_fwded = 0;
+  fInfo->num_tx = d_nsenders;
 }
 
 
@@ -1784,6 +1935,53 @@ digital_ofdm_frame_sink::deinterleave(unsigned char *data, int len) {
    free(out);
 }
 
+// apurv++ comment: demaps an entire OFDM symbol in one go (with pilots) //
+unsigned int digital_ofdm_frame_sink::demap_CF_data(gr_complex *in,
+	                                            unsigned char *out)
+{
+  int nbits = d_data_nbits;
+
+  unsigned int i=0, bytes_produced=0;
+  while(i < d_data_carriers.size()) {
+    if(d_nresid > 0) {
+      d_partial_byte |= d_resid;
+      d_byte_offset += d_nresid;
+      d_nresid = 0;
+      d_resid = 0;
+    }
+
+    while((d_byte_offset < 8) && (i < d_data_carriers.size())) {
+
+      unsigned char bits = slicer(in[d_data_carriers[i]], d_data_sym_position, d_data_sym_value_out);
+
+      i++;
+      if((8 - d_byte_offset) >= nbits) {
+        d_partial_byte |= bits << (d_byte_offset);
+        d_byte_offset += nbits;
+      }
+      else {
+        d_nresid = nbits-(8-d_byte_offset);
+        int mask = ((1<<(8-d_byte_offset))-1);
+        d_partial_byte |= (bits & mask) << d_byte_offset;
+        d_resid = bits >> (8-d_byte_offset);
+        d_byte_offset += (nbits - d_nresid);
+      }
+      //printf("demod symbol: %.4f + j%.4f   bits: %x   partial_byte: %x   byte_offset: %d   resid: %x   nresid: %d\n", 
+       //    in[i-1].real(), in[i-1].imag(), bits, d_partial_byte, d_byte_offset, d_resid, d_nresid);
+    }
+
+    if(d_byte_offset == 8) {
+      //printf("demod byte: %x \n\n", d_partial_byte);
+      out[bytes_produced++] = d_partial_byte;
+      d_byte_offset = 0;
+      d_partial_byte = 0;
+    }
+  }
+
+  // cleanup //
+  return bytes_produced;
+}
+
 #if 0
 inline void
 digital_ofdm_frame_sink::process_state_SYNC_CF(FlowInfo *fInfo) {
@@ -1972,7 +2170,12 @@ digital_ofdm_frame_sink::demodulate_CF(std::string &decoded_msg, FlowInfo *fInfo
       equalize_CF(&out_symbols[offset], o);
 
       memset(bytes_out, 0, sizeof(unsigned char) * d_occupied_carriers);
-      int bytes_decoded = demap(&out_symbols[offset], bytes_out, false);
+      int bytes_decoded = 0;
+
+      if(fInfo->num_tx > 1)
+	 bytes_decoded = demap_CF_data(&out_symbols[offset], bytes_out);
+      else
+         bytes_decoded = demap(&out_symbols[offset], bytes_out, false);
 
       unsigned int jj = 0;
       while(jj < bytes_decoded) {

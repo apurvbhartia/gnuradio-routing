@@ -51,7 +51,15 @@ class ofdm_receiver(gr.hier_block2):
     self.connect(self, self.chan_filt)
     self.connect(self.chan_filt, gr.file_sink(gr.sizeof_gr_complex, "rx-filt.dat"))
 
-    sync = ofdm_sync_pn(fft_length, cp_length, True, logging)
+    zeros_on_left = int(math.ceil((fft_length - occupied_tones)/2.0))
+    ks0 = fft_length*[0,]
+    ks0[zeros_on_left : zeros_on_left + occupied_tones] = ks[0]
+    ks0 = fft.ifftshift(ks0)
+    ks0time = fft.ifft(ks0)
+    ks0time = ks0time.tolist()
+
+    #sync = ofdm_sync_pn(fft_length, cp_length, True, logging)		# raw
+    sync = ofdm_sync_pn(fft_length, cp_length, True, ks0time, threshold, logging)	# crosscorr version
 
     use_chan_filt=1
     if use_chan_filt == 0:
@@ -68,20 +76,28 @@ class ofdm_receiver(gr.hier_block2):
 
     # sample at symbol boundaries
     # NOTE: (sync,2) indicates the first sample of the symbol!
-    sampler = digital_swig.ofdm_sampler(fft_length, fft_length+cp_length, len(ks), timeout=100)		# apurv--
+    sampler = digital_swig.ofdm_sampler(fft_length, fft_length+cp_length, len(ks)+1, timeout=100)		# apurv--
 
+    # frequency offset correction #
     self.connect((sync,0), (sigmix,0))
     self.connect((sync,1), nco, (sigmix,1))
-    self.connect((sync,2), (sampler,1))  # timing signal to sample at
     self.connect(sigmix, (sampler,0))
-       
+    self.connect((sync,2), (sampler,1))
+
+    """
+    self.connect((sync,0), (sampler,0))
+    self.connect((sync,2), (sampler,1))  # timing signal to sample at
+    self.connect((sync,1), gr.file_sink(gr.sizeof_float, "offset.dat"))
+    """
+
     self.connect((sampler, 1), gr.file_sink(gr.sizeof_char, "sampler_timing.dat"))
+    #self.connect((sampler, 2), gr.file_sink(gr.sizeof_char*fft_length, "sampler_timing_fft.dat"))
 
     # fft on the symbols
     win = [1 for i in range(fft_length)]
     # see gr_fft_vcc_fftw that it works differently if win = []
-    fft = gr.fft_vcc(fft_length, True, win, True)
-    self.connect((sampler,0), fft)
+    fft1 = gr.fft_vcc(fft_length, True, win, True)
+    self.connect((sampler,0), fft1)
 
     # use the preamble to correct the coarse frequency offset and initial equalizer
     ###frame_acq = raw.ofdm_frame_acquisition(fft_length, cp_length, preambles_raw, carriers)
@@ -90,7 +106,7 @@ class ofdm_receiver(gr.hier_block2):
 
     self.frame_acq = frame_acq
 
-    self.connect(fft, (frame_acq,0))
+    self.connect(fft1, (frame_acq,0))
     self.connect((sampler,1), (frame_acq,1))
 
     #self.connect(fft, gr.null_sink(gr.sizeof_gr_complex*options.fft_length))
@@ -108,7 +124,7 @@ class ofdm_receiver(gr.hier_block2):
     if logging:
       self.connect(self.chan_filt,
                    gr.file_sink(gr.sizeof_gr_complex, "rx-filt.dat"))
-      self.connect(fft,
+      self.connect(fft1,
                    gr.file_sink(gr.sizeof_gr_complex*fft_length, "rx-fft.dat"))
       self.connect((frame_acq,0),
                    gr.file_sink(gr.sizeof_gr_complex*occupied_tones, "rx-acq.dat"))

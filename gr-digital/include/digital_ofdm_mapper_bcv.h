@@ -567,7 +567,7 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
   /* for CF */
   int work_CF(int, gr_vector_const_void_star&, gr_vector_void_star&);
   int work_forwarder_CF(int, gr_vector_const_void_star&, gr_vector_void_star&);
-  void prepare_packet_CF_fwd(NodeId);
+  void prepare_packet_CF_fwd(SchedulerMsg);
   void copyOFDMSymbolData_CF(gr_complex*);
   void processPacket_CF(gr_message_sptr, FlowInfo*);
 
@@ -591,6 +591,10 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
   void interleave(unsigned char*, int);
   int getPadBytes(int);
   int fec_N, fec_K;
+
+  void generateOFDMSymbolData_alamouti(gr_complex*, FlowInfo*);
+  void generateModulatedData_CF();
+  PktInfo d_pktInfo;
 };
 
 #endif

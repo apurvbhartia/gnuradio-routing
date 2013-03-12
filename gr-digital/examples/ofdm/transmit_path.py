@@ -58,6 +58,7 @@ class transmit_path(gr.hier_block2):
 
         # Create and setup transmit path flow graph
         self.connect(self.ofdm_tx, self.amp, self)
+        self.connect(self.amp, gr.file_sink(gr.sizeof_gr_complex, "ofdm_sink.dat"))
 
     def set_tx_amplitude(self, ampl):
         """
