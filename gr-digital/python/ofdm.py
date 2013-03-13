@@ -125,7 +125,7 @@ class ofdm_mod(gr.hier_block2):
         self._pkt_input = digital_swig.ofdm_mapper_bcv(hdr_rotated_const, data_rotated_const, 
 					     padded_preambles,msgq_limit,
                                              options.occupied_tones, options.fft_length,
-					     options.tdma, options.proto,
+					     options.tdma, options.proto, options.ack,
                                              options.id, options.src,
                                              options.batch_size,
 					     options.dst_id,
@@ -355,7 +355,7 @@ class ofdm_demod(gr.hier_block2):
 					     data_rotated_const, range(data_arity),
 					     preambles,
                                              self._rcvd_pktq, self._out_pktq,
-                                             self._occupied_tones, self._fft_length, options.proto,
+                                             self._occupied_tones, self._fft_length, options.proto, options.ack,
                                              phgain, frgain, self._id,
                                              self._batch_size, 
                                              self._size, self._fec_n, self._fec_k)
@@ -419,6 +419,8 @@ class ofdm_demod(gr.hier_block2):
                           help="refer ofdm.py (demod) param [default=%default]")
         expert.add_option("", "--proto", type="intx", default=0,
                           help="SPP:0, PRO: 1 [default=%default]")
+	expert.add_option("", "--ack", type="intx", default=0,
+                          help="enables ACK on ethernet [default=%default]")
 
 	# used in ofdm_receiver.py #
         expert.add_option("", "--use-default", type="intx", default=1,

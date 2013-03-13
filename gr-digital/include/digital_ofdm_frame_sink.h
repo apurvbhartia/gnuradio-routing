@@ -76,7 +76,7 @@ digital_make_ofdm_frame_sink (const std::vector<gr_complex> &hdr_sym_position,
 			 const std::vector<std::vector<gr_complex> > &preamble,
 			 gr_msg_queue_sptr target_queue, gr_msg_queue_sptr fwd_queue, 
 			 unsigned int occupied_tones, unsigned int fft_length,
-			 unsigned int proto,
+			 unsigned int proto, unsigned int ack_mode,
 			 float phase_gain=0.25, float freq_gain=0.25*0.25/4.0, unsigned int id=1, 
 			 unsigned int batch_size=1,  
 			 int exp_size=400, int fec_n=0, int fec_k=0);
@@ -370,7 +370,7 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
                            const std::vector<unsigned char> &data_sym_value_out,
 			   const std::vector<std::vector<gr_complex> > &preamble,
 			   gr_msg_queue_sptr target_queue, gr_msg_queue_sptr fwd_queue, 
-			   unsigned int occupied_tones, unsigned int fft_length, unsigned int proto,
+			   unsigned int occupied_tones, unsigned int fft_length, unsigned int proto, unsigned int ack_mode,
 			   float phase_gain, float freq_gain, unsigned int id, 
 			   unsigned int batch_size,
 			   int exp_size, int fec_n, int fec_k);
@@ -395,6 +395,7 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
   int                d_packet_whitener_offset;  // offset into whitener string to use
   int		     d_packetlen_cnt;		// how many so far
   int		     d_proto;
+  int		     d_ack;
 
   gr_complex * d_derotated_output;  // Pointer to output stream to send deroated symbols out
 
@@ -431,7 +432,7 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
 		     const std::vector<std::vector<gr_complex> > &preamble,
 		     gr_msg_queue_sptr target_queue, gr_msg_queue_sptr fwd_queue, 
 		     unsigned int occupied_tones, unsigned int fft_length,
-		     unsigned int proto,
+		     unsigned int proto, unsigned int ack_mode,
 		     float phase_gain, float freq_gain, unsigned int id, 
 		     unsigned int batch_size,  
 		     int exp_size, int fec_n, int fec_k);
@@ -612,6 +613,13 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
  bool d_joint_rx;
  void decode_alamouti(FlowInfo*);
  void equalizePilot(gr_complex*, FlowInfo*);
+
+ void logDataSymbols(gr_complex *out);
+ FILE *d_fp;
+
+ gr_complex *d_known_data;
+ void read_data_snr(gr_complex*, int);
+ void calculate_snr_data(gr_complex*);
 
  // --------------------------------- CF ends ------------------------------- //
 

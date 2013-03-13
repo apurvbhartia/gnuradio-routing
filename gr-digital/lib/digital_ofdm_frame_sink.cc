@@ -451,7 +451,7 @@ digital_make_ofdm_frame_sink(const std::vector<gr_complex> &hdr_sym_position,
 			const std::vector<std::vector<gr_complex> > &preamble,
                         gr_msg_queue_sptr target_queue, gr_msg_queue_sptr fwd_queue, 
 			unsigned int occupied_carriers, unsigned int fft_length,
-			unsigned int proto,
+			unsigned int proto, unsigned int ack_mode,
                         float phase_gain, float freq_gain, unsigned int id, 
 			unsigned int batch_size, int exp_size, int fec_n, int fec_k)
 {
@@ -459,7 +459,7 @@ digital_make_ofdm_frame_sink(const std::vector<gr_complex> &hdr_sym_position,
 							data_sym_position, data_sym_value_out,
 							preamble,
                                                         target_queue, fwd_queue,
-							occupied_carriers, fft_length, proto,
+							occupied_carriers, fft_length, proto, ack_mode,
                                                         phase_gain, freq_gain, id,
 							batch_size, 
 							exp_size, fec_n, fec_k));
@@ -473,7 +473,7 @@ digital_ofdm_frame_sink::digital_ofdm_frame_sink(const std::vector<gr_complex> &
 				       const std::vector<std::vector<gr_complex> > &preamble,
                                        gr_msg_queue_sptr target_queue, gr_msg_queue_sptr fwd_queue, 
 				       unsigned int occupied_carriers, unsigned int fft_length,
-				       unsigned int proto,
+				       unsigned int proto, unsigned int ack_mode,
                                        float phase_gain, float freq_gain, unsigned int id,
 				       unsigned int batch_size, 
 				       int exp_size, int fec_n, int fec_k)
@@ -495,7 +495,8 @@ digital_ofdm_frame_sink::digital_ofdm_frame_sink(const std::vector<gr_complex> &
     fec_K(fec_k),
     d_preamble(preamble),
     d_preamble_cnt(0),
-    d_proto(proto)
+    d_proto(proto), 
+    d_ack(ack_mode)
 {
 
    assign_subcarriers();
@@ -553,17 +554,20 @@ digital_ofdm_frame_sink::digital_ofdm_frame_sink(const std::vector<gr_complex> &
   if(d_proto == SPP) {
     /* spp has per-hop ACKs and the route is determined through route.txt */
     populateRouteInfo();
-    create_per_hop_ack_socks();
+    if(d_ack) create_per_hop_ack_socks();
   }
   else if(d_proto == PRO) {
     /* pro has only dst-source ACKs and route is through credit.txt */
     populateCreditWeightInfo();
-    create_e2e_ack_socks();
+    if(d_ack) create_e2e_ack_socks();
   }
   else if(d_proto == CF) {
     populateCompositeLinkInfo_CF();
-    create_e2e_ack_socks();
+    if(d_ack) create_e2e_ack_socks();
   }
+
+  d_known_data = NULL;
+  d_fp = NULL;
 }
 
 void
@@ -766,7 +770,7 @@ digital_ofdm_frame_sink::work (int noutput_items,
        std::string decoded_msg;
        if(d_proto == SPP) {
           bool tx_ack = demodulate_packet(decoded_msg, flowInfo);
-	  send_ack(tx_ack, flowInfo);					// per-hop ack
+	  if(d_ack) send_ack(tx_ack, flowInfo);					// per-hop ack
 	  if(tx_ack && d_fwd) {
 	     // update credit //
 	     makePacket_SPP(decoded_msg, flowInfo);
@@ -776,7 +780,7 @@ digital_ofdm_frame_sink::work (int noutput_items,
           bool tx_ack = demodulate_packet(decoded_msg, flowInfo);
 	  if(d_dst) {
 	     bool e2e_ack_pro = decodePacket(decoded_msg, flowInfo);
-	     if(e2e_ack_pro) 
+	     if(e2e_ack_pro && d_ack) 
 	        send_ack(true, flowInfo);
 	  } else {
 	     assert(d_fwd);
@@ -790,7 +794,7 @@ digital_ofdm_frame_sink::work (int noutput_items,
 	
 	  if(d_dst) {
 	     bool tx_ack = demodulate_packet(decoded_msg, flowInfo);	
-	     send_ack(tx_ack, flowInfo);	
+	     if(d_ack) send_ack(tx_ack, flowInfo);	
 	  }
 	  else {
 	     assert(d_fwd);
@@ -913,20 +917,29 @@ digital_ofdm_frame_sink::decode_alamouti(FlowInfo *fInfo) {
 	  int index = d_data_carriers[j];
 	  int offset1 = (i*d_occupied_carriers) + index;
 	  int offset2 = ((i+1)*d_occupied_carriers)+index;
-	  gr_complex h1 = (gr_complex(1.0, 0.0)/h[0][index]) * factor[j];
+	  gr_complex h1 = (gr_complex(1.0, 0.0)/h[0][index]);// * factor[j];
 	  gr_complex h2 = gr_complex(1.0, 0.0)/h[1][index];
 
-#if 0
-	  out[offset1] = (conj(h1)*in[offset1]) + ((h2)*conj(in[offset2]));
-	  out[offset2] = (conj(h2)*in[offset1]) - ((h1)*conj(in[offset2]));
+#if 1
+	  out[offset1] = ((conj(h1)*in[offset1]) + ((h2)*conj(in[offset2])))/(norm(h1)+norm(h2));
+	  out[offset2] = ((conj(h2)*in[offset1]) - ((h1)*conj(in[offset2])))/(norm(h1)+norm(h2));
+
+	  printf("o: %d, sub: %d, (%f, %f) = ((%f, %f) * (%f, %f)) + (((%f, %f) * (%f, %f))\n",
+				i, j, out[offset1].real(), out[offset1].imag(), conj(h1).real(), conj(h1).imag(), in[offset1].real(), in[offset1].imag(),
+				h2.real(), h2.imag(), conj(in[offset2]).real(), conj(in[offset2]).imag());
+
+	  printf("o: %d, sub: %d, (%f, %f) = ((%f, %f) * (%f, %f)) - (((%f, %f) * (%f, %f))\n",
+                                i, j, out[offset2].real(), out[offset2].imag(), conj(h2).real(), conj(h2).imag(), in[offset1].real(), in[offset1].imag(),
+                                h1.real(), h1.imag(), conj(in[offset2]).real(), conj(in[offset2]).imag());
+
 #else
 
 	  out[offset1] = (conj(h1)*rot_out[j]) + (h2*conj(rot_out[d_data_carriers.size()+j]));
           out[offset2] = (conj(h2)*rot_out[j]) - (h1*conj(rot_out[d_data_carriers.size()+j]));
 #endif
 
-	  out[offset1] /= (norm(h1)+norm(h2));
-	  out[offset2] /= (norm(h1)+norm(h2));
+	  //out[offset1] /= (norm(h1)+norm(h2));
+	  //out[offset2] /= (norm(h1)+norm(h2));
 
 	  printf("o: %d, sub: %d, offset: %d, in: (%.2f, %.2f), out: (%.2f, %.2f) factor (%.2f) -- ", i, index, offset1, in[offset1].real(), in[offset1].imag(), out[offset1].real(), out[offset1].imag(), arg(factor[j]));
 	  printf("o: %d, sub: %d, offset: %d, in: (%.2f, %.2f), out: (%.2f, %.2f) \n", i+1, index, offset2, in[offset2].real(), in[offset2].imag(), out[offset2].real(), out[offset2].imag());
@@ -935,6 +948,44 @@ digital_ofdm_frame_sink::decode_alamouti(FlowInfo *fInfo) {
 
   memcpy(in, out, sizeof(gr_complex)*d_occupied_carriers*d_num_ofdm_symbols);
   free(out);
+}
+
+void
+digital_ofdm_frame_sink::logDataSymbols(gr_complex *out)
+{
+  if(d_fp == NULL) {
+      printf("opening file\n"); fflush(stdout);
+      int fd;
+      const char *filename = "rx_symbols.dat";
+      if ((fd = open (filename, O_WRONLY|O_CREAT|O_TRUNC|OUR_O_LARGEFILE|OUR_O_BINARY|O_APPEND, 0664)) < 0) {
+         perror(filename);
+         assert(false);
+      }
+      else {
+         if((d_fp = fdopen (fd, true ? "wb" : "w")) == NULL) {
+              fprintf(stderr, "log file cannot be opened\n");
+              close(fd);
+              assert(false);
+         }
+      }
+  }
+
+  int nc = d_data_carriers.size();
+  gr_complex *log_symbols = (gr_complex*) malloc(sizeof(gr_complex) * nc * d_num_ofdm_symbols);
+
+  int index=0;
+  for(int o=0; o<d_num_ofdm_symbols; o++) {
+      for(int i = 0; i < nc; i++) {
+	  int offset = o*d_occupied_carriers+d_data_carriers[i];
+          memcpy(log_symbols+index, out+offset, sizeof(gr_complex));
+	  index++;
+      }
+  }
+
+  int count = fwrite_unlocked(log_symbols, sizeof(gr_complex), nc*d_num_ofdm_symbols, d_fp);
+  assert(count == nc*d_num_ofdm_symbols);
+  //printf("count: %d written to known_data.dat, total: %d \n", count, ftell(d_fp)); fflush(stdout);
+  free(log_symbols);
 }
 
 void
@@ -958,6 +1009,7 @@ digital_ofdm_frame_sink::demodulate_packet(std::string& decoded_msg, FlowInfo *f
   unsigned char packet[MAX_PKT_LEN];
   bool crc_valid = false;
 
+  calculate_snr_data(out_symbols);
   //printf("d_partial_byte: %d, d_byte_offset: %d\n", d_partial_byte, d_byte_offset); 
   for(unsigned int o = 0; o < d_num_ofdm_symbols; o++) {
       unsigned int offset = o * d_occupied_carriers;
@@ -1444,19 +1496,69 @@ digital_ofdm_frame_sink::populateEthernetAddress()
 
 inline void
 digital_ofdm_frame_sink::calculate_snr(gr_complex *in) {
-  const std::vector<gr_complex> &ks = d_preamble[d_preamble_cnt];
 
   float err = 0.0;
   float pow = 0.0;
 
+  const std::vector<gr_complex> &ks = d_preamble[d_preamble_cnt];
   for(int i=0; i<d_occupied_carriers;i++) {
-     //printf("ks: (%f, %f), in: (%f, %f)\n", ks[i].real(), ks[i].imag(), in[i].real(), in[i].imag());
+      //printf("ks: (%f, %f), in: (%f, %f)\n", ks[i].real(), ks[i].imag(), in[i].real(), in[i].imag());
+      err += norm(ks[i]-in[i]);
+      pow += norm(ks[i]);
+  }
+  printf("calculate_snr: %f\n", 10*log10(pow/err)); fflush(stdout);
+}
 
-     err += norm(ks[i]-in[i]);
-     pow += norm(ks[i]);
+/* calculate the snr for the data portion
+   'known_data' has (num_ofdm_symbols*d_data_carriers) entries
+   'in' has (num_ofdm_symbols*d_occupied_carriers) entries
+*/
+inline void
+digital_ofdm_frame_sink::calculate_snr_data(gr_complex *in) {
+
+  int nc = d_data_carriers.size();
+  // calculate snr for the data //
+  int num_ofdm_symbols = ceil(((float) (d_packetlen * 8))/(nc * d_data_nbits));
+  if(d_known_data == NULL) {
+     d_known_data = (gr_complex*) malloc(sizeof(gr_complex)*num_ofdm_symbols*nc);
+     read_data_snr(d_known_data, num_ofdm_symbols*nc);
+  }
+  assert(d_known_data != NULL);
+
+  float err = 0.0;
+  float pow = 0.0;
+  for(int i=0; i<num_ofdm_symbols; i++) {
+      float terr = 0.0;
+      float tpow = 0.0;
+      for(int j=0; j<nc;j++) {
+	  int ioffset = i*d_occupied_carriers+d_data_carriers[j];
+	  int koffset = i*nc+j;
+
+	  printf("i: %d, j: %d, ks: (%.2f, %.2f), in: (%.2f, %.2f), terr: %f, txpow: %f\n", i, j, d_known_data[koffset].real(), d_known_data[koffset].imag(),
+	  					in[ioffset].real(), in[ioffset].imag(), norm(d_known_data[koffset]-in[ioffset]), norm(d_known_data[koffset])); fflush(stdout);
+          err += norm(d_known_data[koffset]-in[ioffset]);
+          pow += norm(d_known_data[koffset]);
+
+	  terr += norm(d_known_data[koffset]-in[ioffset]);
+	  tpow += norm(d_known_data[koffset]);
+      }
+      printf("snr_ofdm_symbol: %d, snr: %f\n", i, 10*log10(tpow/terr)); fflush(stdout);
+  }
+  printf("calculate_snr_data: %f, pow: %.2f, err: %.2f, num_ofdm_symbols: %d\n", 10*log10(pow/err), pow, err, num_ofdm_symbols); fflush(stdout);
+}
+
+inline void
+digital_ofdm_frame_sink::read_data_snr(gr_complex *data, int items) {
+  FILE *fp;
+  if((fp = fopen("known_data.dat", "rb")) == NULL) {
+    fprintf(stderr, "data file cannot be opened\n");
+    assert(false);
   }
 
-  printf("calculate_snr: %f\n", 10*log10(pow/err)); fflush(stdout);
+  int count = fread_unlocked(data, sizeof(gr_complex), items, fp);
+  assert(count == items);
+
+  fclose(fp);
 }
 
 /* util function */
@@ -1981,230 +2083,3 @@ unsigned int digital_ofdm_frame_sink::demap_CF_data(gr_complex *in,
   // cleanup //
   return bytes_produced;
 }
-
-#if 0
-inline void
-digital_ofdm_frame_sink::process_state_SYNC_CF(FlowInfo *fInfo) {
-   assert(d_batch_size == 1);
-   /* ensure if I'm in the current session, then the pkt num matches the d_save_pkt_num */
-   printf("d_save_flag: %d, d_pkt_num: %d, d_save_pkt_num: %d\n", d_save_flag, d_pkt_num, d_save_pkt_num); fflush(stdout);
-   if(d_save_flag) {
-      if(d_pkt_num != d_save_pkt_num) {
-	 reset_demapper();
-	 resetPktInfo(d_pktInfo);
-	 flowInfo->innovative_pkts.pop_back();
-      }
-   }
-
-   d_sender_index++;
-   /* first pkt in session should always be from the lead sender */
-   if(d_lead_sender == 1 && d_pkt_type == DATA_TYPE) {
-	printf("lead sender: %d, senders: %d!\n", d_header.src_id, d_nsenders); fflush(stdout);
-	if(!shouldProcess_CF()) {
-	   enter_search();
-	   reset_demapper();
-	   break;
-	}
-
-        assert(d_fwd || d_dst);
-	prepareForNewBatch(fInfo);				// ensure the FlowInfo is in place
-
-	/* interested in pkt! create a new PktInfo for the flow */
-	d_pktInfo = createPktInfo();
-	d_pending_senders = d_nsenders;
-	d_save_flag = true;         				// indicates that a session is on, e'one will be saved (haha)
-	d_save_pkt_num = d_pkt_num;
-    }
-    else if(d_pkt_type == DATA_TYPE) {
-	printf("following sender: %d, pending_senders: %d, nsenders: %d!\n", d_header.src_id, d_pending_senders, d_nsenders); fflush(stdout);
-    }
-    else assert(false);
- 
-   if(d_save_flag) {
-      save_coefficients_CF();					// saves in d_pktInfo
-
-      if(d_pending_senders == 1) {
- 	 d_pending_senders = 0;
-	 d_save_flag = false;
-	 enter_have_header_CF();
-      } 
-      else {
-	 assert(d_pending_senders > 1);				// more senders remain - switch to preamble look-up
-	 d_pending_senders--;
-	 enter_search();
-      }
-
-   } else {
-      enter_search(); 						// don't care
-      reset_demapper();
-      break;
-   } 
-}
-
-inline void
-digital_ofdm_frame_sink::save_coefficients_CF() {
-  NodeId sender_id = d_prev_hop_id;
-  assert(sender_id >= 0);
-
-  gr_complex *hestimates = (gr_complex*) malloc(sizeof(gr_complex) * d_occupied_carriers);
-  memcpy(hestimates, d_in_estimates, sizeof(gr_complex) * d_occupied_carriers);
-
-#ifdef DEBUG
-  float atten = 0.0;
-  for(int i = 0; i < d_occupied_carriers; i++) 
-     atten += abs(hestimates[i]);
-  atten /= ((float) d_occupied_carriers);
-  printf("sender: %c, avg_atten: %.3f\n", sender_id, atten); fflush(stdout);
-#endif
-
-  d_pktInfo->senders.push_back(sender_id);
-  d_pktInfo->norm_factor.push_back(d_header.factor);
-  d_pktInfo->hestimates.push_back(hestimates);                                  // push all the estimates //
-  printf("save_coeffs end\n"); fflush(stdout);
-}
-
-inline void
-digital_ofdm_frame_sink::enter_have_header_CF() {
-  assert(d_fwd || d_dst);
-  d_state = STATE_HAVE_HEADER;
-  d_curr_ofdm_symbol_index = 0;
-  d_num_ofdm_symbols = ceil(((float) (d_packetlen * 8))/(d_data_carriers.size() * d_data_nbits));
-  assert(d_num_ofdm_symbols < MAX_OFDM_SYMBOLS);                 // 70 (gr_message.h) 
-  printf("d_num_ofdm_symbols: %d, actual sc size: %d, d_data_nbits: %d\n", d_num_ofdm_symbols, d_data_carriers.size(), d_data_nbits);
-  fflush(stdout);
-
-  d_pktInfo->symbols = (gr_complex*) malloc(sizeof(gr_complex) * d_num_ofdm_symbols * d_occupied_carriers);
-  memset(d_pktInfo->symbols, 0, sizeof(gr_complex) * d_num_ofdm_symbols * d_occupied_carriers);
-  printf("allocated pktInfo rxSymbols\n"); fflush(stdout);
-}
-
-inline void
-digital_ofdm_frame_sink::post_process_CF(FlowInfo *fInfo) {
-  equalizePkt_CF();
-  if(d_dst) {
-     std::string decoded_msg;
-     bool tx_ack = demodulate_CF(decoded_msg, fInfo);
-     send_ack(tx_ack, fInfo);
-  }
-  else {
-     makePacket_CF();     
-  }
-}
-
-/* equalize the packet and remove the frequency offset h1.e1.x + h2.e2.x = x(h1e1+h2e2) */
-inline void
-digital_ofdm_frame_sink::equalize_CF(gr_complex *in, int o_index) {
-  gr_complex phase_error = 0.0;
-  float cur_pilot = 1.0;
-
-  int n_senders = d_pktInfo->n_senders;
-  int sender_index = (o_index % n_senders);
-
-  for (unsigned int i = 0; i < d_pilot_carriers.size(); i++) {
-    gr_complex pilot_sym(cur_pilot, 0.0);
-    cur_pilot = -cur_pilot;
-    int di = d_pilot_carriers[i];
-
-    gr_complex total_H(0.0, 0.0);
-    assert(n_senders <= 2);
-    for(unsigned int j = n_senders-1; j < n_senders; j++) {
-        gr_complex *estimates = hestimates[j];
-        in[di] *= estimates[di];
-        total_H += estimates[di];
-    }
-#if 0 
-    if(n_senders == 2) {                        // REMOVEEEEEEEEEEE
-        in[di] = in[di]/total_H;
-    }
-#endif
-    // some debugging //
-#if 0
-    float angle = arg(in[di]) * 180/M_PI;                       // rotation after equalization //
-    if(angle < 0) angle += 360.0;
-    float perfect_angle = arg(pilot_sym) * 180/M_PI;
-    float delta_rotation = perfect_angle - angle;
-    //printf("pilot %d, delta_P=%.3f\t", di, delta_rotation); fflush(stdout);
-    printf("(%d, rot=%.2f)  ", di, delta_rotation); fflush(stdout);
-#endif
-
-    phase_error += (in[di] * conj(pilot_sym));
-  }
-
-  // update phase equalizer
-  float angle = arg(phase_error);
-  carrier = gr_expj(-angle);
-
-#if 0
-  // dump the frequency offset value //
-  float freq_offset = angle/(2 * M_PI * (o+NULL_OFDM_SYMBOLS));
-  printf("(@f: %.5f)  ", freq_offset); fflush(stdout);
-#endif
-
-  // update DFE based on pilots
-  cur_pilot = 1.0;
-  for (unsigned int i = 0; i < d_pilot_carriers.size(); i++) {
-    gr_complex pilot_sym(cur_pilot, 0.0);
-    cur_pilot = -cur_pilot;
-    int di = d_pilot_carriers[i];
-    gr_complex sigeq = in[di] * carrier * dfe_pilot[i];
-    // FIX THE FOLLOWING STATEMENT
-    if (norm(sigeq)> 0.001)
-      dfe_pilot[i] += d_eq_gain * (pilot_sym/sigeq - dfe_pilot[i]);
-  }
-  d_end_angle[sender] = angle;
-  //printf("  d_end_angle: %f\n", d_end_angle[sender]); fflush(stdout);
-}
-
-/* equalize the pilot and demod 1 OFDM symbol at a time - keep getting the bytes out */
-inline void
-digital_ofdm_frame_sink::demodulate_CF(std::string &decoded_msg, FlowInfo *fInfo) {
-  unsigned char *bytes_out = (unsigned char*) malloc(sizeof(unsigned char) * d_occupied_carriers);
-
-  gr_complex *out_symbols = d_pktInfo->symbols;
-  int packetlen_cnt = 0;
-  unsigned char packet[MAX_PKT_LEN];
-  bool crc_valid = false;
-
-  for(int o = 0; o < d_num_ofdm_symbols; o++) {
-      int offset = o * d_occupied_carriers;
-      equalize_CF(&out_symbols[offset], o);
-
-      memset(bytes_out, 0, sizeof(unsigned char) * d_occupied_carriers);
-      int bytes_decoded = 0;
-
-      if(fInfo->num_tx > 1)
-	 bytes_decoded = demap_CF_data(&out_symbols[offset], bytes_out);
-      else
-         bytes_decoded = demap(&out_symbols[offset], bytes_out, false);
-
-      unsigned int jj = 0;
-      while(jj < bytes_decoded) {
-           packet[packetlen_cnt++] = bytes_out[jj++];
-
-           if (packetlen_cnt == d_packetlen){              // packet is filled
-
-               gr_message_sptr msg = gr_make_message(0, d_packet_whitener_offset, 0, packetlen_cnt);
-               memcpy(msg->msg(), packet, packetlen_cnt);
-
-               crc_valid = crc_check(msg->to_string(), decoded_msg);
-               printf("crc valid: %d\n", crc_valid); fflush(stdout);
-
-               msg.reset();                            // free it up
-           }
-      }
-  }
-
-  free(bytes_out);
-}
-
-inline void
-digital_ofdm_frame_sink::adjust_H_estimate(int sender)
-{
-  gr_complex *hestimate = d_pktInfo->hestimates[sender];
-  float delta_angle = d_end_angle[sender] - d_start_angle[sender] + ((NUM_TRAINING_SYMBOLS+1) * d_slope_angle[sender]);
-  printf("adjust_H_estimate: %.3f\n", delta_angle); fflush(stdout);
-  for(unsigned int i = 0; i < d_occupied_carriers; i++) {
-     hestimate[i] *= gr_expj(-delta_angle);
-  }
-}
-#endif

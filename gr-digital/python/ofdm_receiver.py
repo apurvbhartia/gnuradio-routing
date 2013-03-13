@@ -106,8 +106,18 @@ class ofdm_receiver(gr.hier_block2):
 
     self.frame_acq = frame_acq
 
+    # normal operation #
+    self.connect((fft1, 0), gr.file_sink(gr.sizeof_gr_complex*options.fft_length, "fft-out.dat")) 
+    self.connect((sampler, 1), gr.file_sink(gr.sizeof_char, "sampler_timing.dat"))
     self.connect(fft1, (frame_acq,0))
     self.connect((sampler,1), (frame_acq,1))
+
+    """ 
+    # enable to have manual input to frame_acq # 
+    self.connect(fft1, gr.null_sink(gr.sizeof_gr_complex*options.fft_length))
+    self.connect(gr.file_source(gr.sizeof_gr_complex*options.fft_length, "combined.dat"), (frame_acq,0))
+    self.connect(gr.file_source(gr.sizeof_char, "combined_t.dat"), (frame_acq,1))
+    """
 
     #self.connect(fft, gr.null_sink(gr.sizeof_gr_complex*options.fft_length))
     #self.connect((sampler, 1), gr.null_sink(gr.sizeof_char))

@@ -28,6 +28,7 @@
 
 #include <@NAME@.h>
 #include <gr_io_signature.h>
+#include <cstdio>
 
 @SPTR_NAME@
 gr_make_@BASE_NAME@ ()
@@ -55,6 +56,7 @@ int
   for (int i = 0; i < noutput_items; i++){
     if(ctrl[i]) {
       d_data = iptr[i];
+      printf("d_data: %.2f\n", d_data); fflush(stdout);
     }
     optr[i] = d_data;
   }

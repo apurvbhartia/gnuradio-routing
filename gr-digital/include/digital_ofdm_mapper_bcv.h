@@ -331,7 +331,7 @@ digital_make_ofdm_mapper_bcv (const std::vector<gr_complex> &hdr_constellation,
 			 const std::vector<std::vector<gr_complex> > &preamble,
 			 unsigned msgq_limit, 
 			 unsigned occupied_carriers, unsigned int fft_length, 
-			 unsigned int tdma, unsigned int proto,
+			 unsigned int tdma, unsigned int proto, unsigned int ack_mode,
 			 unsigned int id=1,
 			 unsigned int source_flag=0,
 			 unsigned int batch_size=1,
@@ -355,7 +355,7 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
 			   const std::vector<std::vector<gr_complex> > &preamble,
 			   unsigned msgq_limit, 
 			   unsigned occupied_carriers, unsigned int fft_length, 
-			   unsigned int tdma, unsigned int proto,
+			   unsigned int tdma, unsigned int proto, unsigned int ack_mode,
 			   unsigned int id,
 			   unsigned int source_flag,
 			   unsigned int batch_size, unsigned int dst_id,
@@ -366,7 +366,7 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
 			 const std::vector<std::vector<gr_complex> > &preamble,
 			 unsigned msgq_limit, 
 		         unsigned occupied_carriers, unsigned int fft_length, 
-			 unsigned int tdma, unsigned int proto,
+			 unsigned int tdma, unsigned int proto, unsigned int ack_mode,
 			 unsigned int id,
 			 unsigned int source_flag,
 			 unsigned int batch_size, unsigned int dst_id,
@@ -393,7 +393,7 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
   unsigned int 		d_occupied_carriers;
   unsigned int 		d_fft_length;
   int			d_pending_flag;
-  int			d_proto;
+  int			d_proto, d_ack;
 
   std::vector<int> d_data_carriers;
   std::vector<int> d_pilot_carriers;
@@ -416,9 +416,7 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
 
   
   /* apurv++ starts */
-  bool d_ack;
   bool d_data;
-  void generateOFDMSymbol(gr_complex* out, int len);
 
   bool d_default;
   unsigned int d_source;
@@ -568,7 +566,7 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
   int work_CF(int, gr_vector_const_void_star&, gr_vector_void_star&);
   int work_forwarder_CF(int, gr_vector_const_void_star&, gr_vector_void_star&);
   void prepare_packet_CF_fwd(SchedulerMsg);
-  void copyOFDMSymbolData_CF(gr_complex*);
+  void copyOFDMSymbolData_CF(gr_complex*, int);
   void processPacket_CF(gr_message_sptr, FlowInfo*);
 
   void populateCreditInfo_CF();

@@ -48,14 +48,14 @@ digital_make_ofdm_mapper_bcv (const std::vector<gr_complex> &hdr_constellation,
 			 const std::vector<std::vector<gr_complex> > &preamble,
 			 unsigned int msgq_limit, 
                          unsigned int occupied_carriers, unsigned int fft_length, 
-			 unsigned int tdma, unsigned int proto,
+			 unsigned int tdma, unsigned int proto, unsigned int ack_mode,
 			 unsigned int id,
 			 unsigned int source,
 			 unsigned int batch_size,
 			 unsigned int dst_id,
 			 unsigned int fec_n, unsigned int fec_k)
 {
-  return gnuradio::get_initial_sptr(new digital_ofdm_mapper_bcv (hdr_constellation, data_constellation, preamble, msgq_limit, occupied_carriers, fft_length, tdma, proto, id, source, batch_size, dst_id, 
+  return gnuradio::get_initial_sptr(new digital_ofdm_mapper_bcv (hdr_constellation, data_constellation, preamble, msgq_limit, occupied_carriers, fft_length, tdma, proto, ack_mode, id, source, batch_size, dst_id, 
 								 fec_n, fec_k));
 }
 
@@ -65,7 +65,7 @@ digital_ofdm_mapper_bcv::digital_ofdm_mapper_bcv (const std::vector<gr_complex> 
 					const std::vector<std::vector<gr_complex> > &preamble,
 					unsigned int msgq_limit, 
 					unsigned int occupied_carriers, unsigned int fft_length, 
-					unsigned int tdma, unsigned int proto,
+					unsigned int tdma, unsigned int proto, unsigned int ack_mode,
 					unsigned int id,
 					unsigned int source,
 					unsigned int batch_size,
@@ -92,6 +92,7 @@ digital_ofdm_mapper_bcv::digital_ofdm_mapper_bcv (const std::vector<gr_complex> 
     d_flow('0'),
     d_tdma(tdma),
     d_proto(proto),
+    d_ack(ack_mode),
     fec_N(fec_n), fec_K(fec_k)
 {
 
@@ -141,16 +142,18 @@ digital_ofdm_mapper_bcv::digital_ofdm_mapper_bcv (const std::vector<gr_complex> 
 
   if(d_proto == SPP) {
      populateRouteInfo();
-     create_ack_socks();
+     if(d_ack) create_ack_socks();
   } 
   else if(d_proto == PRO) {
-     create_e2e_ack_socks();
+     if(d_ack) create_e2e_ack_socks();
      populateCreditInfo();			// both the weight and red. values //
   }
   else if(d_proto == CF) {
-     create_e2e_ack_socks();
      populateCreditInfo_CF();
-     open_trigger_sock_CF();
+     if(d_ack) {
+	create_e2e_ack_socks();
+	open_trigger_sock_CF();
+     }
   }
 
   if(d_tdma) {
@@ -164,79 +167,6 @@ digital_ofdm_mapper_bcv::digital_ofdm_mapper_bcv (const std::vector<gr_complex> 
 digital_ofdm_mapper_bcv::~digital_ofdm_mapper_bcv(void)
 {
 }
-
-/* builds a single OFDM symbol */
-void
-digital_ofdm_mapper_bcv::generateOFDMSymbol(gr_complex* out, int len)
-{
-  unsigned int i = 0;
-  unsigned char bits = 0;
-  while((d_msg_offset < len) && (i < d_data_carriers.size())) {
-
-    // need new data to process
-    if(d_bit_offset == 0) {
-      d_msgbytes = d_msg->msg()[d_msg_offset];
-      //printf("mod message byte: %x\n", d_msgbytes);
-    }
-
-    if(d_nresid > 0) {
-      // take the residual bits, fill out nbits with info from the new byte, and put them in the symbol
-      d_resid |= (((1 << d_nresid)-1) & d_msgbytes) << (d_hdr_nbits - d_nresid);
-      bits = d_resid;
-
-      out[d_data_carriers[i]] = d_hdr_constellation[bits];
-      i++;
-
-      d_bit_offset += d_nresid;
-      d_nresid = 0;
-      d_resid = 0;
-    }
-    else {
-      if((8 - d_bit_offset) >= d_hdr_nbits) {  // test to make sure we can fit nbits
-        // take the nbits number of bits at a time from the byte to add to the symbol
-        bits = ((1 << d_hdr_nbits)-1) & (d_msgbytes >> d_bit_offset);
-        d_bit_offset += d_hdr_nbits;
-
-        out[d_data_carriers[i]] = d_hdr_constellation[bits];
-        i++;
-      }
-      else {  // if we can't fit nbits, store them for the next 
-        // saves d_nresid[0] bits of this message where d_nresid[0] < d_nbits
-        unsigned int extra = 8-d_bit_offset;
-        d_resid = ((1 << extra)-1) & (d_msgbytes >> d_bit_offset);
-        d_bit_offset += extra;
-        d_nresid = d_hdr_nbits - extra;
-      }
-
-    }
-
-    //printf("d_bit_offset[0]: %d, d_msg_offset[0]: %d\n", d_bit_offset[0], d_msg_offset[0]); fflush(stdout);
-
-    if(d_bit_offset == 8) {
-      d_bit_offset = 0;
-      d_msg_offset++;
-    }
-  }
-
-  // Ran out of data to put in symbol
-  if (d_msg_offset == len) {
-    if(d_nresid > 0) {
-      d_resid |= 0x00;
-      bits = d_resid;
-      d_nresid = 0;
-      d_resid = 0;
-    }
-
-    while(i < d_data_carriers.size() && (d_ack || d_default)) {   // finish filling out the symbol
-      out[d_data_carriers[i]] = d_hdr_constellation[randsym()];
-
-      i++;
-    }
-
-    assert(d_bit_offset == 0);
-  }
-}
-
 
 /***************************** integrating SOURCE related functionality to this mapper **************************/
 int digital_ofdm_mapper_bcv::randsym()
@@ -338,7 +268,7 @@ digital_ofdm_mapper_bcv::work(int noutput_items,
         return work_forwarder_PRO(noutput_items, input_items, output_items);
   }
 
-  if(d_modulated && flowInfo->pkts_fwded) {
+  if(d_modulated && flowInfo->pkts_fwded && d_ack) {
      check_for_ack(flowInfo);					// non-blocking //
   }
 
@@ -480,8 +410,9 @@ digital_ofdm_mapper_bcv::modulate_and_send(int noutput_items,
 	 generateOFDMSymbolData_alamouti(out, flowInfo);
 	 if(flowInfo->isLead) tx_pilot = false; 
       } 
-      else if(d_proto == CF && !d_source)
-	 copyOFDMSymbolData_CF(out);
+      else if(d_proto == CF && !d_source) {
+	 copyOFDMSymbolData_CF(out, d_ofdm_symbol_index);
+      }
       else 
 	 generateOFDMSymbolData(out); 
 
@@ -1898,6 +1829,9 @@ digital_ofdm_mapper_bcv::work_forwarder_CF(int noutput_items,
          break;
       } // while
       prepare_packet_CF_fwd(reply);
+      FlowInfo *fInfo = getFlowInfo(false, d_flow);
+      if(fInfo->num_tx > 1)
+         generateModulatedData_CF();                             // pregenerate the modulated data, do alamouti later //
    }
 
    /* the payload is already modulated, and only the header needs to be modulated */
@@ -2164,7 +2098,7 @@ digital_ofdm_mapper_bcv::work_CF(int noutput_items,
      return work_forwarder_CF(noutput_items, input_items, output_items);
   }
 
-  if(d_modulated && flowInfo->pkts_fwded) {
+  if(d_modulated && flowInfo->pkts_fwded && d_ack) {
      check_for_ack(flowInfo);                                   // non-blocking //
   }
 
@@ -2191,13 +2125,13 @@ digital_ofdm_mapper_bcv::work_CF(int noutput_items,
 /* does the actual mrc/equal gain combining of all the versions of this packet to 
    get a single packet */
 void
-digital_ofdm_mapper_bcv::copyOFDMSymbolData_CF(gr_complex *out) {
+digital_ofdm_mapper_bcv::copyOFDMSymbolData_CF(gr_complex *out, int ofdm_symbol_index) {
 
   int start_offset = d_data_carriers[0];
   if(d_data_carriers[0] > d_pilot_carriers[0])
       start_offset = d_pilot_carriers[0];
 
-  long offset = d_ofdm_symbol_index*d_occupied_carriers;
+  long offset = ofdm_symbol_index*d_occupied_carriers;
   FlowPktVector::iterator fit = d_flowPktVector.find(d_flow);
   assert(fit != d_flowPktVector.end());
 
@@ -2412,7 +2346,16 @@ digital_ofdm_mapper_bcv::generateModulatedData_CF() {
 
   memset(d_pktInfo.symbols, 0, sizeof(gr_complex)*d_num_ofdm_symbols*d_fft_length);
   for(int o=0; o<d_num_ofdm_symbols; o++) {
-      generateOFDMSymbolData(&(d_pktInfo.symbols[o*d_fft_length]));
+      if(d_source)
+         generateOFDMSymbolData(&(d_pktInfo.symbols[o*d_fft_length]));
+      else {
+	 if(extra_symbol && o==d_num_ofdm_symbols-1) {
+	    // just add the dumb symbol 
+	    memcpy(&(d_pktInfo.symbols[o*d_fft_length]), &(d_pktInfo.symbols[(o-1)*d_fft_length]), sizeof(gr_complex)*d_fft_length);
+	 } else {
+ 	    copyOFDMSymbolData_CF(&(d_pktInfo.symbols[o*d_fft_length]), o);
+	 }
+      }
   }
   d_send_null = false;
   printf("generateModulatedData_CF.. extra: %d, d_num_ofdm_symbols: %d\n", extra_symbol, d_num_ofdm_symbols); fflush(stdout);
