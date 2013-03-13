@@ -162,6 +162,7 @@ digital_ofdm_mapper_bcv::digital_ofdm_mapper_bcv (const std::vector<gr_complex> 
   }
 
   d_pktInfo.symbols = NULL;			// used only for CF+alamouti //
+  d_fp = NULL;
 }
 
 digital_ofdm_mapper_bcv::~digital_ofdm_mapper_bcv(void)
@@ -469,6 +470,40 @@ digital_ofdm_mapper_bcv::modulate_and_send(int noutput_items,
 }
 
 void
+digital_ofdm_mapper_bcv::logDataSymbols(gr_complex *out)
+{
+  //printf("digital_ofdm_mapper_bcv::logDataSymbols\n"); fflush(stdout);
+  if(d_fp == NULL) {
+      printf("opening file\n"); fflush(stdout);
+      int fd;
+      const char *filename = "known_data.dat";
+      if ((fd = open (filename, O_WRONLY|O_CREAT|O_TRUNC|OUR_O_LARGEFILE|OUR_O_BINARY|O_APPEND, 0664)) < 0) {
+         perror(filename);
+         assert(false);
+      }
+      else {
+         if((d_fp = fdopen (fd, true ? "wb" : "w")) == NULL) {
+              fprintf(stderr, "log file cannot be opened\n");
+              close(fd);
+              assert(false);
+         }
+      }
+  }
+
+  int nc = d_data_carriers.size();
+  gr_complex *log_symbols = (gr_complex*) malloc(sizeof(gr_complex) * nc);
+
+  for(int i = 0; i < nc; i++) {
+     memcpy(log_symbols+i, out+d_data_carriers[i], sizeof(gr_complex));
+  }
+
+  int count = fwrite_unlocked(log_symbols, sizeof(gr_complex), nc, d_fp);
+  assert(count == nc);
+  //printf("count: %d written to known_data.dat, total: %d \n", count, ftell(d_fp)); fflush(stdout);
+  free(log_symbols);
+}
+
+void
 digital_ofdm_mapper_bcv::assign_subcarriers() {
   int dc_tones = 8;
   int num_pilots = 8;
@@ -744,6 +779,7 @@ digital_ofdm_mapper_bcv::makeHeader(FlowInfo *fInfo)
       d_header.link_id = '0';
       d_header.lead_sender = int(fInfo->isLead) + '0';
       d_header.nsenders = fInfo->num_tx+'0';
+      d_header.lead_sender = '1';			// src is always the lead sender
 
       printf("lead_sender: %c, nsenders: %c\n", d_header.lead_sender, d_header.nsenders); fflush(stdout);     
  	
@@ -1180,6 +1216,9 @@ digital_ofdm_mapper_bcv::getFlowInfo(bool create, unsigned char flowId)
      flow_info->active_batch = -1;
      flow_info->last_batch_acked = -1;
      flow_info->nextLinkId = '0';
+     flow_info->num_tx = 1;
+     flow_info->isLead = 1;	
+
      d_flowInfoVector.push_back(flow_info);
 
      if(d_proto == CF) {
@@ -2356,6 +2395,7 @@ digital_ofdm_mapper_bcv::generateModulatedData_CF() {
  	    copyOFDMSymbolData_CF(&(d_pktInfo.symbols[o*d_fft_length]), o);
 	 }
       }
+      logDataSymbols(&(d_pktInfo.symbols[o*d_fft_length]));
   }
   d_send_null = false;
   printf("generateModulatedData_CF.. extra: %d, d_num_ofdm_symbols: %d\n", extra_symbol, d_num_ofdm_symbols); fflush(stdout);
