@@ -612,6 +612,7 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
  unsigned int d_lead_sender;
  bool d_joint_rx;
  void decode_alamouti(FlowInfo*);
+ void decode_alamouti(FlowInfo*, int);
  void equalizePilot(gr_complex*, FlowInfo*);
 
  void logDataSymbols(gr_complex *out);

@@ -126,12 +126,12 @@ digital_ofdm_frame_sink::process_have_sync(gr_complex *in, gr_complex *in_estima
          printf("HEADER OK prev_hop: %d pkt_num: %d batch_num: %d dst_id: %d\n", d_header.prev_hop_id, d_header.pkt_num, d_header.batch_number, d_header.dst_id); fflush(stdout);
 	 extract_header();                                             // fills local fields with header info
 
-	 if(d_lead_sender || d_proto != CF) {
-	    if(!shouldProcess(flowInfo)) {
+	 if(!shouldProcess(flowInfo)) {
                enter_search();
                return;
-            }	
-	
+         }
+
+	 if(d_lead_sender || d_proto != CF) {
 	    prepareForNewBatch(flowInfo);
 	    d_pending_senders = d_nsenders;
 	    if(d_pending_senders > 1) {
@@ -145,6 +145,8 @@ digital_ofdm_frame_sink::process_have_sync(gr_complex *in, gr_complex *in_estima
   	 }
 
 	 d_pending_senders--;
+	 printf("d_pending_senders: %d, proto: %d\n", d_pending_senders, d_proto); fflush(stdout);
+
 	 if(d_pending_senders == 0 || d_proto != CF) {
 	    enter_have_header(flowInfo);
 	 }
@@ -708,6 +710,7 @@ digital_ofdm_frame_sink::work (int noutput_items,
     if(d_joint_rx && !sig[0]) {
        d_null_symbols = 0;
        d_state = STATE_ABSENT_SENDER;					// sender absent
+       printf("SYNC_SEARCH, new state:: STATE_ABSENT_SENDER\n"); fflush(stdout);
        break;
     }
 	
@@ -734,12 +737,8 @@ digital_ofdm_frame_sink::work (int noutput_items,
     flowInfo = getFlowInfo(false, d_flow);
     assert(d_joint_rx && d_proto == CF);
     if(d_null_symbols == (d_preamble.size()+d_num_hdr_ofdm_symbols)) {
-       d_pending_senders--;
-       if(d_pending_senders == 0) 
-	  enter_have_header(flowInfo);
-       else 
-	  enter_search();
-    }     
+       enter_have_header(flowInfo);
+    } 
     break;
 
   case STATE_HAVE_HEADER:						// process the frame after header
@@ -789,7 +788,8 @@ digital_ofdm_frame_sink::work (int noutput_items,
        }
        else if(d_proto == CF) {
 	  if(flowInfo->num_tx > 1) {
-	     decode_alamouti(flowInfo);
+	     if(d_pending_senders == 0) decode_alamouti(flowInfo);
+	     else decode_alamouti(flowInfo, 0);
 	  }
 	
 	  if(d_dst) {
@@ -923,7 +923,8 @@ digital_ofdm_frame_sink::decode_alamouti(FlowInfo *fInfo) {
 #if 1
 	  out[offset1] = ((conj(h1)*in[offset1]) + ((h2)*conj(in[offset2])))/(norm(h1)+norm(h2));
 	  out[offset2] = ((conj(h2)*in[offset1]) - ((h1)*conj(in[offset2])))/(norm(h1)+norm(h2));
-
+	
+	  /*
 	  printf("o: %d, sub: %d, (%f, %f) = ((%f, %f) * (%f, %f)) + (((%f, %f) * (%f, %f))\n",
 				i, j, out[offset1].real(), out[offset1].imag(), conj(h1).real(), conj(h1).imag(), in[offset1].real(), in[offset1].imag(),
 				h2.real(), h2.imag(), conj(in[offset2]).real(), conj(in[offset2]).imag());
@@ -931,6 +932,7 @@ digital_ofdm_frame_sink::decode_alamouti(FlowInfo *fInfo) {
 	  printf("o: %d, sub: %d, (%f, %f) = ((%f, %f) * (%f, %f)) - (((%f, %f) * (%f, %f))\n",
                                 i, j, out[offset2].real(), out[offset2].imag(), conj(h2).real(), conj(h2).imag(), in[offset1].real(), in[offset1].imag(),
                                 h1.real(), h1.imag(), conj(in[offset2]).real(), conj(in[offset2]).imag());
+	  */
 
 #else
 
@@ -941,13 +943,66 @@ digital_ofdm_frame_sink::decode_alamouti(FlowInfo *fInfo) {
 	  //out[offset1] /= (norm(h1)+norm(h2));
 	  //out[offset2] /= (norm(h1)+norm(h2));
 
-	  printf("o: %d, sub: %d, offset: %d, in: (%.2f, %.2f), out: (%.2f, %.2f) factor (%.2f) -- ", i, index, offset1, in[offset1].real(), in[offset1].imag(), out[offset1].real(), out[offset1].imag(), arg(factor[j]));
-	  printf("o: %d, sub: %d, offset: %d, in: (%.2f, %.2f), out: (%.2f, %.2f) \n", i+1, index, offset2, in[offset2].real(), in[offset2].imag(), out[offset2].real(), out[offset2].imag());
+	  //printf("o: %d, sub: %d, offset: %d, in: (%.2f, %.2f), out: (%.2f, %.2f) factor (%.2f) -- ", i, index, offset1, in[offset1].real(), in[offset1].imag(), out[offset1].real(), out[offset1].imag(), arg(factor[j]));
+	  //printf("o: %d, sub: %d, offset: %d, in: (%.2f, %.2f), out: (%.2f, %.2f) \n", i+1, index, offset2, in[offset2].real(), in[offset2].imag(), out[offset2].real(), out[offset2].imag());
       }
   }
 
   memcpy(in, out, sizeof(gr_complex)*d_occupied_carriers*d_num_ofdm_symbols);
   free(out);
+}
+
+/* decoding, when only 1 sender participated and did alamouti, rather then both tx together */
+void
+digital_ofdm_frame_sink::decode_alamouti(FlowInfo *fInfo, int sender_index) {
+
+  assert(sender_index == 0);			// only lead will be processed
+
+  printf("decode_alamouti\n"); fflush(stdout);
+  assert(d_proto == CF && fInfo->num_tx > 1);
+  gr_complex *in = d_pktInfo->symbols;
+
+  gr_complex h[MAX_OCCUPIED_CARRIERS] = fInfo->hestimates[sender_index];
+  equalizeSymbols(in, h);
+
+  int nc = d_data_carriers.size();
+
+  if(sender_index == 0) {
+     //	[s1   -s2*]
+     for(int i=1; i<d_num_ofdm_symbols; i+=2) {
+         for(int j=0; j<nc; j++) {
+	     int offset = i*d_occupied_carriers+d_data_carriers[j];
+	     in[offset] = -conj(in[offset]);
+         }
+     }
+  }
+  else {
+	/* need to enable it later */
+     assert(false);
+     // [s2    s1*]
+     for(int i=0; i<d_num_ofdm_symbols; i+=2) {
+         for(int j=0; j<nc; j++) {
+	     int offset1 = i*d_occupied_carriers+d_data_carriers[j];
+	     int offset2 = offset1+d_occupied_carriers;
+	     gr_complex t = in[offset1];
+	     in[offset1] = conj(in[offset2]);
+	     in[offset2] = t;
+         }
+
+#if 0
+	 /* if the lead sender did not transmit, then the packet is already screwed, 
+	    if the slave did not transmit, omit any pilot processing */
+
+	 if(sender_index > 0) { 
+            equalizePilot(in+(i*d_occupied_carriers), fInfo);
+            equalizePilot(in+((i+1)*d_occupied_carriers), fInfo);
+
+            equalize_interpolate_dfe(in+(i*d_occupied_carriers), rot_out, factor);                            // correct by e^(2.pi.f.t)
+            equalize_interpolate_dfe(in+((i+1)*d_occupied_carriers), rot_out+d_data_carriers.size(), NULL);                   // correct by e^(2.pi.f.(t+1))
+	}
+#endif
+     }
+  }
 }
 
 void

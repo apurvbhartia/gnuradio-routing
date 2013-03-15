@@ -804,14 +804,15 @@ digital_ofdm_mapper_bcv::makeHeader(FlowInfo *fInfo)
 	    memcpy(d_header.coeffs, fInfo->coeffs, d_batch_size);
 	 }
 	 else if(d_proto == CF) {
-	    d_header.prev_hop_id = fInfo->leadId;		// useless for CF, only link matters!
+	    d_header.prev_hop_id = d_id;			// useless for CF, only link matters!
 	    d_header.packetlen = fInfo->packetlen;
 	    d_header.link_id = fInfo->nextLinkId;
 	    d_header.pkt_num = fInfo->seqNo;			// in case of CF, just use the unique seqNo, which will be consistent even for multiple tx
 	    d_header.nsenders = fInfo->num_tx + '0';
-            printf("(MAPPER) makeHeader batch: %d, pkt: %d, len: %d, src: %c, dst: %c, flow: %c, next_hop: %c, nextLink: %c\n",           
+	    d_header.lead_sender = int(fInfo->isLead) + '0';
+            printf("(MAPPER) makeHeader batch: %d, pkt: %d, len: %d, src: %c, dst: %c, flow: %c, next_hop: %c, nextLink: %c, lead: %c\n",           
                     fInfo->active_batch, d_pkt_num, fInfo->packetlen, fInfo->src, fInfo->dst, fInfo->flowId,         
-                    fInfo->nextHopId, fInfo->nextLinkId);
+                    fInfo->nextHopId, fInfo->nextLinkId, d_header.lead_sender);
             fflush(stdout);
 	 }
       }
@@ -1835,8 +1836,11 @@ digital_ofdm_mapper_bcv::work_forwarder_CF(int noutput_items,
             }
 
             tx_ok = check_credit_CF(false, flowId);            // non-blocking!
-            if(!tx_ok) {
+	    FlowInfo *fInfo = getFlowInfo(false, flowId);
+            if(!tx_ok || (reply.batch_num != fInfo->active_batch)) {
 	       if(reply.lead_sender == d_id) {
+		  printf("Sending ABORT Trigger.. tx_ok: %d, reply.batch: %d, active_batch: %d\n",
+			  tx_ok, reply.batch_num, fInfo->active_batch); fflush(stdout);
 		  send_scheduler_msg(REQUEST_ABORT_MSG, flowId);   // abort to the scheduler
 		  send_trigger_abort_CF(reply);         // abort to the slaves
                    request_sent = false;
@@ -1859,7 +1863,11 @@ digital_ofdm_mapper_bcv::work_forwarder_CF(int noutput_items,
 	    assert(rx_trigger.lead_id == reply.lead_sender);
 	    assert(rx_trigger.flow == reply.flow);
 	    assert(rx_trigger.batch_num == reply.batch_num);
-	    if(rx_trigger.type == TRIGGER_ABORT) {
+
+	    FlowInfo *fInfo = getFlowInfo(false, reply.flow);
+	    if(rx_trigger.type == TRIGGER_ABORT || (fInfo->active_batch != reply.batch_num)) {
+		printf("RX Trigger ABORT.. reply.batch: %d, active_batch: %d\n",
+                          reply.batch_num, fInfo->active_batch); fflush(stdout);
 		continue;
 	    }
 	    d_out_pkt_time = uhd::time_spec_t(rx_trigger.secs, rx_trigger.frac_secs);
