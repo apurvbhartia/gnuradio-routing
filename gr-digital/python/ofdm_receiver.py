@@ -58,8 +58,14 @@ class ofdm_receiver(gr.hier_block2):
     ks0time = fft.ifft(ks0)
     ks0time = ks0time.tolist()
 
+    ks1 = fft_length*[0,]
+    ks1[zeros_on_left : zeros_on_left + occupied_tones] = ks[1]
+    ks1 = fft.ifftshift(ks1)
+    ks1time = fft.ifft(ks1)
+    ks1time = ks1time.tolist()	
+
     #sync = ofdm_sync_pn(fft_length, cp_length, True, logging)		# raw
-    sync = ofdm_sync_pn(fft_length, cp_length, True, ks0time, threshold, logging)	# crosscorr version
+    sync = ofdm_sync_pn(fft_length, cp_length, True, ks0time, ks1time, threshold, logging)	# crosscorr version
 
     use_chan_filt=1
     if use_chan_filt == 0:

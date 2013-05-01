@@ -59,7 +59,7 @@
 #define PRO 1
 #define CF 2
 
-#define MAX_SENDERS 4
+#define MAX_SENDERS 2
 
 typedef struct coeff_str {
   unsigned short phase;				// scaled

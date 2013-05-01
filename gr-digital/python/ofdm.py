@@ -88,9 +88,12 @@ class ofdm_mod(gr.hier_block2):
         preamble2_offset = 10*self._occupied_tones;
         ksfreq2 = known_symbols_4512_3[preamble2_offset:preamble2_offset+self._occupied_tones]
 
+	'''
+	# inserting zeros in every other frequency bin #
         for i in range(len(ksfreq)):
             if((zeros_on_left + i) & 1):
                 ksfreq[i] = 0
+	'''
 
         # hard-coded known symbols
         preambles = (ksfreq, ksfreq2, ksfreq2)
@@ -313,9 +316,12 @@ class ofdm_demod(gr.hier_block2):
 	preamble2_offset = 10*self._occupied_tones;
 	ksfreq2 = known_symbols_4512_3[preamble2_offset:preamble2_offset+self._occupied_tones]
 
+	'''
+	# inserting zeros in every other frequency bin #
         for i in range(len(ksfreq)):
             if((zeros_on_left + i) & 1):
                 ksfreq[i] = 0
+	'''
 
         # hard-coded known symbols
         preambles = (ksfreq, ksfreq2) #, ksfreq2, ksfreq2, ksfreq2)			# coarse_offset from 1st preamble, equalizer from the rest

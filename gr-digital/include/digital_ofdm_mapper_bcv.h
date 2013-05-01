@@ -594,8 +594,9 @@ class DIGITAL_API digital_ofdm_mapper_bcv : public gr_sync_block
   void generateModulatedData_CF();
   PktInfo d_pktInfo;
 
-  void logDataSymbols(gr_complex*);
-  FILE *d_fp;
+  void logNativeSymbols(gr_complex*);
+  void logAlamoutiSymbols(gr_complex*);
+  FILE *d_fp, *d_fp1;
 };
 
 #endif

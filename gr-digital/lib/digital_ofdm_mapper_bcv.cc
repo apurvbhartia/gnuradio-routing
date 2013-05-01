@@ -162,7 +162,7 @@ digital_ofdm_mapper_bcv::digital_ofdm_mapper_bcv (const std::vector<gr_complex> 
   }
 
   d_pktInfo.symbols = NULL;			// used only for CF+alamouti //
-  d_fp = NULL;
+  d_fp = NULL; d_fp1 = NULL;
 }
 
 digital_ofdm_mapper_bcv::~digital_ofdm_mapper_bcv(void)
@@ -380,7 +380,7 @@ digital_ofdm_mapper_bcv::modulate_and_send(int noutput_items,
   }
   /* end */
 
-#if 1
+#if 1 
   if(d_proto == CF && flowInfo->num_tx > 1 && !flowInfo->isLead && d_null_symbol_cnt < (d_preamble.size()+d_num_hdr_symbols)) {
      d_null_symbol_cnt++;	
   } else
@@ -409,7 +409,7 @@ digital_ofdm_mapper_bcv::modulate_and_send(int noutput_items,
       if(d_proto == CF && flowInfo->num_tx > 1) {
 	 assert(d_num_ofdm_symbols%2 == 0);
 	 generateOFDMSymbolData_alamouti(out, flowInfo);
-	 if(flowInfo->isLead) tx_pilot = false; 
+	 //if(flowInfo->isLead) tx_pilot = false; 
       } 
       else if(d_proto == CF && !d_source) {
 	 copyOFDMSymbolData_CF(out, d_ofdm_symbol_index);
@@ -417,8 +417,17 @@ digital_ofdm_mapper_bcv::modulate_and_send(int noutput_items,
       else 
 	 generateOFDMSymbolData(out); 
 
+       // to send the pilot or not //
+       if(flowInfo->num_tx > 1) {
+	  if((flowInfo->isLead && d_ofdm_symbol_index%2 == 0) || (!flowInfo->isLead && d_ofdm_symbol_index%2 == 1))
+	     tx_pilot = true;
+	  else
+	     tx_pilot = false;
+       }	
+
+
  	// offline, timekeeping, etc //
-      d_ofdm_symbol_index++;
+       d_ofdm_symbol_index++;
   }
   else {
       // send a NULL symbol at the end //
@@ -469,10 +478,42 @@ digital_ofdm_mapper_bcv::modulate_and_send(int noutput_items,
   return 1;
 }
 
+/* same as logData, but logs the alamouti coded */
 void
-digital_ofdm_mapper_bcv::logDataSymbols(gr_complex *out)
+digital_ofdm_mapper_bcv::logAlamoutiSymbols(gr_complex *out) {
+  if(d_fp1 == NULL) {
+      printf("opening file\n"); fflush(stdout);
+      int fd;
+      const char *filename = "alamouti_data.dat";
+      if ((fd = open (filename, O_WRONLY|O_CREAT|O_TRUNC|OUR_O_LARGEFILE|OUR_O_BINARY|O_APPEND, 0664)) < 0) {
+         perror(filename);
+         assert(false);
+      }
+      else {
+         if((d_fp1 = fdopen (fd, true ? "wb" : "w")) == NULL) {
+              fprintf(stderr, "log file cannot be opened\n");
+              close(fd);
+              assert(false);
+         }
+      }
+  }
+
+  int nc = d_data_carriers.size();
+  gr_complex *log_symbols = (gr_complex*) malloc(sizeof(gr_complex) * nc);
+
+  for(int i = 0; i < nc; i++) {
+     memcpy(log_symbols+i, out+d_data_carriers[i], sizeof(gr_complex));
+  }
+
+  int count = fwrite_unlocked(log_symbols, sizeof(gr_complex), nc, d_fp1);
+  assert(count == nc);
+  free(log_symbols);
+}
+
+/* logs the native data, makes a difference when alamouti is taking place */
+void
+digital_ofdm_mapper_bcv::logNativeSymbols(gr_complex *out)
 {
-  //printf("digital_ofdm_mapper_bcv::logDataSymbols\n"); fflush(stdout);
   if(d_fp == NULL) {
       printf("opening file\n"); fflush(stdout);
       int fd;
@@ -779,7 +820,12 @@ digital_ofdm_mapper_bcv::makeHeader(FlowInfo *fInfo)
       d_header.link_id = '0';
       d_header.lead_sender = int(fInfo->isLead) + '0';
       d_header.nsenders = fInfo->num_tx+'0';
-      d_header.lead_sender = '1';			// src is always the lead sender
+
+#if 0
+      // enable only for testing //
+      d_header.nsenders = '1';
+      d_header.lead_sender = '1';	
+#endif
 
       printf("lead_sender: %c, nsenders: %c\n", d_header.lead_sender, d_header.nsenders); fflush(stdout);     
  	
@@ -809,10 +855,9 @@ digital_ofdm_mapper_bcv::makeHeader(FlowInfo *fInfo)
 	    d_header.link_id = fInfo->nextLinkId;
 	    d_header.pkt_num = fInfo->seqNo;			// in case of CF, just use the unique seqNo, which will be consistent even for multiple tx
 	    d_header.nsenders = fInfo->num_tx + '0';
-	    d_header.lead_sender = int(fInfo->isLead) + '0';
-            printf("(MAPPER) makeHeader batch: %d, pkt: %d, len: %d, src: %c, dst: %c, flow: %c, next_hop: %c, nextLink: %c, lead: %c\n",           
+            printf("(MAPPER) makeHeader batch: %d, pkt: %d, len: %d, src: %c, dst: %c, flow: %c, next_hop: %c, nextLink: %c\n",           
                     fInfo->active_batch, d_pkt_num, fInfo->packetlen, fInfo->src, fInfo->dst, fInfo->flowId,         
-                    fInfo->nextHopId, fInfo->nextLinkId, d_header.lead_sender);
+                    fInfo->nextHopId, fInfo->nextLinkId);
             fflush(stdout);
 	 }
       }
@@ -2356,16 +2401,28 @@ digital_ofdm_mapper_bcv::interleave(unsigned char *data, int len) {
 */
 inline void
 digital_ofdm_mapper_bcv::generateOFDMSymbolData_alamouti(gr_complex* out, FlowInfo *fInfo) {
+  printf("generateOFDMSymbolData_alamouti\n"); fflush(stdout);
   gr_complex *symbols = d_pktInfo.symbols;
   int offset = d_ofdm_symbol_index*d_fft_length;
 
   // if the lead sender //
   if(fInfo->isLead) {
      for(int i=0; i<d_data_carriers.size(); i++) {
-        if(d_ofdm_symbol_index%2==0)
+	gr_complex s, o;
+        if(d_ofdm_symbol_index%2==0) {
             out[d_data_carriers[i]] = symbols[offset+d_data_carriers[i]];
-         else
+	    s = symbols[offset+d_data_carriers[i]];
+	 }
+         else {
 	    out[d_data_carriers[i]] = -conj(symbols[offset+d_data_carriers[i]]);
+	    s = symbols[offset+d_data_carriers[i]];
+	 }
+
+	 o = out[d_data_carriers[i]];
+	 printf("o: %d, i: %d, index: %d, s: (%.3f, %.3f), out: (%.3f, %.3f)\n", d_ofdm_symbol_index, i, d_data_carriers[i], 
+					s.real(), s.imag(), o.real(), o.imag()); fflush(stdout);
+				
+		
      }
   }
   else {
@@ -2377,15 +2434,20 @@ digital_ofdm_mapper_bcv::generateOFDMSymbolData_alamouti(gr_complex* out, FlowIn
 	    out[d_data_carriers[i]] = conj(symbols[offset-d_fft_length+d_data_carriers[i]]);
      }
   }
+
+  logAlamoutiSymbols(out);
 }
 
 /* used when alamouti codes are used, pre-generates all the ofdm symbols at once, 
    so in modulate_and_send, the alamouti codes can be used on these symbols */
 inline void
 digital_ofdm_mapper_bcv::generateModulatedData_CF() {
-  bool extra_symbol = (d_num_ofdm_symbols%2==0)?false:true;		// add 1 OFDM symbol, if odd to work with alamouti (2x1)
+  int num_ofdm_symbols = ceil(((float) ((d_packetlen) * 8))/(d_data_carriers.size() * d_data_nbits));
+  bool extra_symbol = (num_ofdm_symbols%2==0)?false:true;		// add 1 OFDM symbol, if odd to work with alamouti (2x1)
   if(extra_symbol) 
-     d_num_ofdm_symbols++;
+     d_num_ofdm_symbols = num_ofdm_symbols+1;
+  else
+     d_num_ofdm_symbols = num_ofdm_symbols;
 
   if(d_pktInfo.symbols == NULL) {
      d_pktInfo.symbols = (gr_complex*) malloc(sizeof(gr_complex)*d_num_ofdm_symbols*d_fft_length);
@@ -2403,7 +2465,7 @@ digital_ofdm_mapper_bcv::generateModulatedData_CF() {
  	    copyOFDMSymbolData_CF(&(d_pktInfo.symbols[o*d_fft_length]), o);
 	 }
       }
-      logDataSymbols(&(d_pktInfo.symbols[o*d_fft_length]));
+      logNativeSymbols(&(d_pktInfo.symbols[o*d_fft_length]));
   }
   d_send_null = false;
   printf("generateModulatedData_CF.. extra: %d, d_num_ofdm_symbols: %d\n", extra_symbol, d_num_ofdm_symbols); fflush(stdout);

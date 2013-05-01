@@ -67,7 +67,7 @@ int
   unsigned char state = 0;
   int i = 0;
 
-  d_avg = -1.0f;
+  //d_avg = -1.0f;
 
   //printf("noutput_items %d\n",noutput_items);
   while(i < noutput_items) {
@@ -76,6 +76,7 @@ int
 	state = 1;
       }
       else {
+	d_avg = (d_avg_alpha)*iptr[i] + (1-d_avg_alpha)*d_avg;
 	i++;
       }
     }
@@ -84,9 +85,11 @@ int
       if(iptr[i] > peak_val) {
 	peak_val = iptr[i];
 	peak_ind = i;
+	d_avg = (d_avg_alpha)*iptr[i] + (1-d_avg_alpha)*d_avg;
 	i++;
       }
       else if (iptr[i] > d_avg*d_threshold_factor_fall) {
+	d_avg = (d_avg_alpha)*iptr[i] + (1-d_avg_alpha)*d_avg;
 	i++;
       }
       else {
@@ -105,6 +108,6 @@ int
   }
   else {   // only return up to passing the threshold
     //printf("Leave in State 1, only produced %d of %d\n",peak_ind,noutput_items);
-    return peak_ind;
+    return peak_ind+1;
   }
 }

@@ -57,7 +57,6 @@
 #define OUR_O_LARGEFILE 0
 #endif
 
-#define MAX_SENDERS 4
 
 #define MAX_PKT_LEN 4096
 
@@ -443,8 +442,8 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
   
   bool header_ok();
   
-  unsigned char slicer(const gr_complex x, const std::vector<gr_complex> &sym_position, const std::vector<unsigned char> &sym_value_out);
-  unsigned int demap(const gr_complex *in, unsigned char *out, bool is_header);
+  unsigned char slicer(const gr_complex x, const std::vector<gr_complex> &sym_position, const std::vector<unsigned char> &sym_value_out, bool, int);
+  unsigned int demap(gr_complex *in, unsigned char *out, bool is_header);
   void reset_demapper();
   void storePayload(gr_complex *in);
 
@@ -543,7 +542,7 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
   /* pilots */
   void assign_subcarriers();
   void fill_all_carriers_map();
-  void equalize_interpolate_dfe(const gr_complex *in, gr_complex *out, gr_complex*);
+  void equalize_interpolate_dfe(gr_complex *in, gr_complex*);
 
   /* to send the ACK on the backend ethernet */
   void send_ack(bool tx_ack, FlowInfo *flowInfo);
@@ -587,7 +586,7 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
  uhd::time_spec_t d_last_pkt_time, d_out_pkt_time;
 
  // preamble related //
- void calculate_snr(gr_complex*);
+ void calculate_snr_preamble(gr_complex*);
  const std::vector<std::vector<gr_complex> >   d_preamble; 
  int d_preamble_cnt;
 
@@ -615,16 +614,22 @@ class DIGITAL_API digital_ofdm_frame_sink : public gr_sync_block
  void decode_alamouti(FlowInfo*, int);
  void equalizePilot(gr_complex*, FlowInfo*);
 
- void logDataSymbols(gr_complex *out);
+ void logDataSymbols(gr_complex *out, FlowInfo*, int);
  FILE *d_fp;
 
  gr_complex *d_known_data;
- void read_data_snr(gr_complex*, int);
+ void read_known_data(gr_complex*, int);
  void calculate_snr_data(gr_complex*);
+ void recalculate_h(gr_complex *in, gr_complex *h1, gr_complex *h2); //gr_complex (&h)[MAX_SENDERS][MAX_OCCUPIED_CARRIERS]);
 
+ FILE *d_fp1;
+ void logOFDMSymbol(gr_complex*);
+ void log_pilot_corrected_symbols(gr_complex *in, gr_complex *h);
+ void logH(gr_complex*);
  // --------------------------------- CF ends ------------------------------- //
 
  vector<unsigned> d_interleave_map;
  void deinterleave(unsigned char*, int);
+ float d_noise;
 };
 #endif /* INCLUDED_GR_OFDM_FRAME_SINK_H */

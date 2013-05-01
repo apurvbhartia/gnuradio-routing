@@ -42,7 +42,7 @@ class ofdm_sync_pn(gr.hier_block2):
   Edited for readability only.
   """
   #def __init__(self, fft_length, cp_length, half_sync, logging=False):
-  def __init__(self, fft_length, cp_length, half_sync, kstime, threshold, logging=False):
+  def __init__(self, fft_length, cp_length, half_sync, kstime, ks1time, threshold, logging=False):
     gr.hier_block2.__init__(self, "ofdm_sync_pn",
       gr.io_signature(1, 1, gr.sizeof_gr_complex), # Input signature
       gr.io_signature3(3, 3,    # Output signature
@@ -65,32 +65,40 @@ class ofdm_sync_pn(gr.hier_block2):
     P_d = gr.moving_average_cc(window, 1.0)
     self.connect(x_corr, P_d)
 
-    P_d_angle = gr.complex_to_arg()
-    self.connect(P_d, P_d_angle)
-
     # offset by -1
     phi = gr.sample_and_hold_ff()	
-	
+    self.corrmag = gr.complex_to_mag_squared()
+    P_d_angle = gr.complex_to_arg()
+    self.connect(P_d, P_d_angle, (phi, 0))
+
     cross_correlate = 1
     if cross_correlate==1:
-       # cross-correlate with the known symbol
+        #cross-correlate with the known symbol
 	kstime = [k.conjugate() for k in kstime]
 	kstime.reverse()
 	self.crosscorr_filter = gr.fir_filter_ccc(1, kstime)
 
-        # get the magnitude #
-        self.corrmag = gr.complex_to_mag_squared()
-
+	'''
         self.f2b = gr.float_to_char()
         self.slice = gr.threshold_ff(threshold, threshold, 0, fft_length)
-        self.connect(self, self.crosscorr_filter, self.corrmag, self.slice, self.f2b, (phi, 1))
-	self.connect(P_d_angle, (phi,0))
-	self.connect(self.f2b, (self,2))                                # out - timing
+        #self.connect(self, self.crosscorr_filter, self.corrmag, self.slice, self.f2b)
+	self.connect(self.f2b, (phi,1))
+	self.connect(self.f2b, (self,2))
+	self.connect(self.f2b, gr.file_sink(gr.sizeof_char, "ofdm_f2b.dat"))
+	'''
+
+	# new method starts here - only crosscorrelate and use peak_detect block #
+	peak_detect = gr.peak_detector_fb(100, 100, 30, 0.001)
+	self.corrmag1 = gr.complex_to_mag_squared()
+	self.connect(self, self.crosscorr_filter, self.corrmag, peak_detect) 
+
+	self.connect(peak_detect, (phi, 1))
+	self.connect(peak_detect, (self,2))
+
+	self.connect(peak_detect, gr.file_sink(gr.sizeof_char, "sync-peaks_b.dat"))
+        self.connect(self.corrmag, gr.file_sink(gr.sizeof_float, "ofdm_corrmag.dat"))
 	self.connect(self, gr.delay(gr.sizeof_gr_complex, (fft_length)), (self,0))
 
-        # some debug dump #
-        self.connect(self.corrmag, gr.file_sink(gr.sizeof_float, "ofdm_corrmag.dat"))
-        self.connect(self.f2b, gr.file_sink(gr.sizeof_char, "ofdm_f2b.dat"))
     else: 
         # Get the power of the input signal to normalize the output of the correlation
         R_d = gr.moving_average_ff(window, 1.0)
